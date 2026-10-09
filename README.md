@@ -14,7 +14,12 @@ go run ./cmd/bquery-web
 go run ./cmd/bquery-web video.mp4 other.mov
 ```
 
-Open the printed `http://127.0.0.1:8080` URL. Use **Open video** to load files, then:
+Open the printed `http://127.0.0.1:8080` URL. Use **Open video** to upload files,
+or enter a filesystem path under **Open local path** to read a video in place
+without copying it. Registration checks only the file and its format header;
+metadata is indexed when you press **Run query**. Frame counts appear after the
+first frame query. Opening a file or refreshing the page does not run a query.
+For example:
 
 ```sql
 SELECT frame, path, sample_index, pts_seconds
@@ -47,8 +52,9 @@ other frames to decode; it is not a standalone video file.
 
 The server binds to localhost only; use `-port 8090` to choose another port.
 Queries are capped at 500 result rows in the UI, with a visible truncation note;
-the CLI has no UI row cap. The session accepts up to 16 files, with uploads
-limited to 1 GiB per request. Uploads and preview caches live in a temporary
+the CLI has no UI row cap. The session accepts up to 16 files. Uploads stream
+to disk with no fixed size limit; use a local path for large files to avoid
+copying the entire video. Uploads and preview caches live in a temporary
 directory and are deleted when the app exits normally. A removed source's
 temporary copy/cache remains until session cleanup. Stop the app with Ctrl+C.
 Files passed on the command line are read in place; changes detected after
@@ -213,8 +219,15 @@ box count at 100,000 per file, sample-table counts and expanded frame count at
 1,000,000, and checks cancellation during traversal. Unknown
 boxes are opaque; known structural containers are traversed. Media payloads
 are skipped with offsets, so memory use depends on metadata, not video size.
-Metadata and frame rows are currently materialized before querying; LIMIT does not stop
-file parsing, and there is no column or predicate pushdown yet.
+Registration does not parse the movie or create frame rows. Queries over
+`files`, `tracks`, and `boxes` skip sample-table contents. Frame queries build
+and cache compact sample metadata at query time, then produce column values
+on demand without creating a map for every frame. Simple scans with scalar
+comparisons stop after LIMIT matches. Sorting, windows, and computed filters
+need the complete relevant input; subquery results are materialized. LIMIT does
+not stop the initial sample index validation. Media bytes are read only for
+binary downloads or decoding. The one-million-sample bound still applies to
+frame indexing, independently of the file size.
 
 This is a metadata prototype, not a complete MP4 validator. Fragment boxes are
 listed, but fragment-derived duration and frames, compact
@@ -230,7 +243,7 @@ query parsing; there is no semantic search of video contents. Format detection u
 followed by structural validation and a required movie box.
 
 To add a format, implement `format.Adapter` and register it in the CLI. Future
-work: fragmented video support, streaming scans and pushdown, more frame
+work: fragmented video support, deeper sample-table pushdown, more frame
 functions, then additional format adapters.
 
 Window semantics follow the SQL behavior documented in

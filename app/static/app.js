@@ -23,7 +23,7 @@ async function refreshInfo() {
     const item = text("div", "", "source"), heading = text("div", "", "source-heading"), remove = text("button", "×", "remove-source");
     remove.title = `Remove ${src.name} from this session`; remove.setAttribute("aria-label", `Remove ${src.name}`);
     remove.addEventListener("click", () => removeSource(src.id, remove));
-    heading.append(text("strong", src.name), remove); item.append(heading, text("small", `${src.frames.toLocaleString()} frames · ${(src.size / 1048576).toFixed(1)} MB`)); $("sources").append(item);
+    heading.append(text("strong", src.name), remove); item.append(heading, text("small", `${src.frames == null ? "Ready to query" : src.frames.toLocaleString() + " frames"} · ${(src.size / 1048576).toFixed(1)} MB`)); $("sources").append(item);
   }
   $("schema").replaceChildren();
   for (const name of ["frames", "tracks", "files", "boxes"]) {
@@ -127,6 +127,7 @@ async function runQuery() {
   $("frame-title").textContent = "No frame selected"; $("frame-detail").textContent = "Binary frame + decoded preview";
   try {
     const data = await api("/api/query", { sql: $("sql").value }); if (version !== generation) return;
+    await refreshInfo();
     result = data; selection.clear(); result.rows.forEach((r, i) => { if (frameValues(r).length) selection.add(i); }); position = 0;
     renderTable(); updateQueue();
     $("result-note").textContent = data.truncated ? "Showing 500 rows. Add LIMIT or narrow WHERE." : queue.length ? "Select rows for playback · click a frame to inspect" : "Scalar query results";
@@ -169,8 +170,16 @@ $("upload").addEventListener("change", async () => {
       message(`Loading ${file.name}…`, "busy"); const body = new FormData(); body.append("file", file);
       const response = await fetch("/api/upload", { method: "POST", body }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Upload failed");
     }
-    await refreshInfo(); await runQuery();
+    await refreshInfo(); message("Video registered. Run a query to read its metadata.");
   } catch (error) { await refreshInfo().catch(() => {}); message(error.message, "error"); }
   finally { $("upload").value = ""; $("upload").disabled = false; $("run").disabled = false; }
 });
-refreshInfo().then(info => { if (info.sources.length) runQuery(); }).catch(e => message(e.message, "error"));
+$("local-source").addEventListener("submit", async e => {
+  e.preventDefault(); const button = $("open-path"); button.disabled = true;
+  try {
+    await api("/api/source", { path: $("local-path").value }); await refreshInfo();
+    $("local-path").value = ""; message("Video registered in place. Run a query to read its metadata.");
+  } catch (error) { message(error.message, "error"); }
+  finally { button.disabled = false; }
+});
+refreshInfo().catch(e => message(e.message, "error"));

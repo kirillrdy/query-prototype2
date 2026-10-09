@@ -116,15 +116,27 @@ func (q Query) ExecuteWith(ctx context.Context, tables map[string]format.Table, 
 			return Result{}, fmt.Errorf("unknown ORDER BY column %q", o.column)
 		}
 	}
-	rows := table.Rows
-	if len(q.predicates) > 0 {
+	rows := table
+	predicates := q.predicates
+	// Simple scans can stop at LIMIT. Windows and sorting still see their
+	// complete input, as required by SQL semantics.
+	if table.ValueAt != nil && len(q.order) == 0 && q.limit >= 0 && boundedScan(selects, predicates) {
+		rows, err := filterLimited(ctx, table, predicates, q.limit)
+		if err != nil {
+			return Result{}, err
+		}
+		table = rows
+		predicates = nil
+	}
+	rows = table
+	if len(predicates) > 0 {
 		input := newEvaluation(ctx, rows, functions)
-		active := indices(len(rows))
-		matched := make([]bool, len(rows))
+		active := indices(rows.Len())
+		matched := make([]bool, rows.Len())
 		for i := range matched {
 			matched[i] = true
 		}
-		for _, p := range q.predicates {
+		for _, p := range predicates {
 			left, err := input.evaluate(p.left, active)
 			if err != nil {
 				return Result{}, err
@@ -154,15 +166,20 @@ func (q Query) ExecuteWith(ctx context.Context, tables map[string]format.Table, 
 				matched[i] = matched[i] && match
 			}
 		}
-		rows = make([]format.Row, 0)
-		for i, row := range table.Rows {
-			if matched[i] {
-				rows = append(rows, row)
+		selected := make([]int, 0)
+		for i, match := range matched {
+			if match {
+				selected = append(selected, i)
 			}
 		}
+		rows = format.Table{Columns: table.Columns, Count: len(selected), ValueAt: func(i int, c string) any { return table.Value(selected[i], c) }}
 	}
 	e := newEvaluation(ctx, rows, functions)
-	active := indices(len(rows))
+	count := rows.Len()
+	if len(q.order) == 0 && q.limit >= 0 && count > q.limit {
+		count = q.limit
+	}
+	active := indices(count)
 	if len(q.order) > 0 {
 		values := make([][]any, len(q.order))
 		for i, o := range q.order {
@@ -197,6 +214,84 @@ func (q Query) ExecuteWith(ctx context.Context, tables map[string]format.Table, 
 		}
 	}
 	return result, nil
+}
+
+func boundedScan(selects []selection, predicates []predicate) bool {
+	var hasWindow func(*expression) bool
+	hasWindow = func(e *expression) bool {
+		if e.kind == "lag" {
+			return true
+		}
+		for _, a := range e.args {
+			if hasWindow(a) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, s := range selects {
+		if hasWindow(s.expression) {
+			return false
+		}
+	}
+	for _, p := range predicates {
+		if p.left.kind != "column" && p.left.kind != "literal" {
+			return false
+		}
+		if p.right != nil && p.right.kind != "column" && p.right.kind != "literal" {
+			return false
+		}
+	}
+	return true
+}
+
+func filterLimited(ctx context.Context, table format.Table, predicates []predicate, limit int) (format.Table, error) {
+	// With no filter, LIMIT needs only an indexed prefix.
+	if len(predicates) == 0 {
+		n := table.Len()
+		if n > limit {
+			n = limit
+		}
+		return format.Table{Columns: table.Columns, Count: n, ValueAt: table.Value}, nil
+	}
+	selected := make([]int, 0)
+	for i := 0; i < table.Len() && len(selected) < limit; i++ {
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return format.Table{}, err
+			}
+		}
+		value := func(e *expression) any {
+			if e.kind == "column" {
+				return table.Value(i, e.name)
+			}
+			return e.value
+		}
+		matched := true
+		for _, p := range predicates {
+			a := value(p.left)
+			match := false
+			if p.op == "IS NULL" {
+				match = a == nil
+			} else if p.op == "IS NOT NULL" {
+				match = a != nil
+			} else {
+				b := value(p.right)
+				if a != nil && b != nil {
+					cmp, ok := compare(a, b)
+					match = ok && compareOp(cmp, p.op)
+				}
+			}
+			if !match {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			selected = append(selected, i)
+		}
+	}
+	return format.Table{Columns: table.Columns, Count: len(selected), ValueAt: func(i int, c string) any { return table.Value(selected[i], c) }}, nil
 }
 func validate(e *expression, known map[string]bool, functions Functions, allowWindow bool) error {
 	switch e.kind {
@@ -234,4 +329,12 @@ func validate(e *expression, known map[string]bool, functions Functions, allowWi
 		}
 	}
 	return nil
+}
+
+// SourceTable identifies the base relation, including through derived queries.
+func (q Query) SourceTable() string {
+	if q.subquery != nil {
+		return q.subquery.SourceTable()
+	}
+	return q.table
 }

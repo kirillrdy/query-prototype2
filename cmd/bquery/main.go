@@ -49,15 +49,12 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) error {
 	adapters := []format.Adapter{mp4.Adapter{}}
 	tables := map[string]format.Table{}
 	for _, path := range flags.Args() {
-		parsed, err := readSource(ctx, path, adapters)
+		parsed, err := readQuerySource(ctx, path, adapters, q.SourceTable())
 		if err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
 		for name, t := range parsed {
-			existing := tables[name]
-			existing.Columns = t.Columns
-			existing.Rows = append(existing.Rows, t.Rows...)
-			tables[name] = existing
+			tables[name] = format.Append(tables[name], t)
 		}
 	}
 	result, err := execute(ctx, q, tables)
@@ -77,17 +74,28 @@ func execute(ctx context.Context, q engine.Query, tables map[string]format.Table
 			os.RemoveAll(temp)
 		}
 	}()
-	var refs map[format.Frame]video.Reference
+	sources := map[string]video.Source{}
 	resolve := func(value any) (video.Reference, error) {
 		frame, ok := value.(format.Frame)
 		if !ok {
 			return video.Reference{}, fmt.Errorf("motion expects frame values, got %T", value)
 		}
-		ref, ok := refs[frame]
-		if !ok {
-			return video.Reference{}, fmt.Errorf("unknown frame")
+		source, exists := sources[frame.Source]
+		if !exists {
+			path, err := filepath.Abs(frame.Source)
+			if err != nil {
+				return video.Reference{}, err
+			}
+			stat, err := os.Stat(path)
+			if err != nil {
+				return video.Reference{}, err
+			}
+			hash := sha256.Sum256([]byte(path))
+			source = video.Source{Key: fmt.Sprintf("%x", hash[:16]), Path: path, Size: stat.Size(), Modified: stat.ModTime()}
+			sources[frame.Source] = source
 		}
-		return ref, nil
+		id := fmt.Sprintf("%s-%d-%d", source.Key, frame.TrackID, frame.SampleIndex)
+		return video.Reference{ID: id, Source: source, Frame: frame}, nil
 	}
 	functions := engine.Functions{"motion": {Arity: 2, Evaluate: func(callCtx context.Context, args [][]any) ([]any, error) {
 		if decoder == nil {
@@ -97,30 +105,6 @@ func execute(ctx context.Context, q engine.Query, tables map[string]format.Table
 				return nil, err
 			}
 			decoder = video.NewDecoder(temp)
-			refs = map[format.Frame]video.Reference{}
-			sources := map[string]video.Source{}
-			for _, row := range tables["frames"].Rows {
-				frame, ok := row["frame"].(format.Frame)
-				if !ok {
-					continue
-				}
-				source, exists := sources[frame.Source]
-				if !exists {
-					path, err := filepath.Abs(frame.Source)
-					if err != nil {
-						return nil, err
-					}
-					stat, err := os.Stat(path)
-					if err != nil {
-						return nil, err
-					}
-					hash := sha256.Sum256([]byte(path))
-					source = video.Source{Key: fmt.Sprintf("%x", hash[:16]), Path: path, Size: stat.Size(), Modified: stat.ModTime()}
-					sources[frame.Source] = source
-				}
-				id := fmt.Sprintf("%s-%d-%d", source.Key, frame.TrackID, frame.SampleIndex)
-				refs[frame] = video.Reference{ID: id, Source: source, Frame: frame}
-			}
 		}
 		return video.Motion(decoder, resolve).Evaluate(callCtx, args)
 	}}}
@@ -130,6 +114,9 @@ func execute(ctx context.Context, q engine.Query, tables map[string]format.Table
 }
 
 func readSource(ctx context.Context, path string, adapters []format.Adapter) (map[string]format.Table, error) {
+	return readQuerySource(ctx, path, adapters, "frames")
+}
+func readQuerySource(ctx context.Context, path string, adapters []format.Adapter, table string) (map[string]format.Table, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -145,6 +132,11 @@ func readSource(ctx context.Context, path string, adapters []format.Adapter) (ma
 	s := format.Source{Name: path, Size: info.Size(), Reader: f}
 	for _, a := range adapters {
 		if a.Probe(s) {
+			if lazy, ok := a.(interface {
+				ReadTables(context.Context, format.Source, string) (map[string]format.Table, error)
+			}); ok {
+				return lazy.ReadTables(ctx, s, table)
+			}
 			return a.Read(ctx, s)
 		}
 	}

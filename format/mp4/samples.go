@@ -154,8 +154,8 @@ func expand(runs []run, count int) ([]int64, error) {
 	return values, nil
 }
 
-func (p *parser) frames() ([]format.Row, error) {
-	rows := make([]format.Row, 0)
+func (p *parser) frameTable() (format.Table, error) {
+	table := Schemas()["frames"]
 	for _, t := range p.sampleTracks {
 		if t.row["handler"] != "vide" {
 			continue
@@ -166,30 +166,30 @@ func (p *parser) frames() ([]format.Row, error) {
 			continue
 		}
 		if !s.seen["stsz"] || !s.seen["stts"] {
-			return nil, fmt.Errorf("video track requires both stsz and stts")
+			return format.Table{}, fmt.Errorf("video track requires both stsz and stts")
 		}
 		count := len(s.sizes)
 		locations, err := p.sampleLocations(s)
 		if err != nil {
-			return nil, err
+			return format.Table{}, err
 		}
-		if len(rows)+count > maxSamples {
-			return nil, fmt.Errorf("frame count exceeds %d per file", maxSamples)
+		if table.Len()+count > maxSamples {
+			return format.Table{}, fmt.Errorf("frame count exceeds %d per file", maxSamples)
 		}
 		durations, err := expand(s.timing, count)
 		if err != nil {
-			return nil, err
+			return format.Table{}, err
 		}
 		offsets := make([]int64, count)
 		if s.seen["ctts"] {
 			offsets, err = expand(s.composition, count)
 			if err != nil {
-				return nil, err
+				return format.Table{}, err
 			}
 		}
 		for index := range s.sync {
 			if uint64(index) > uint64(count) {
-				return nil, fmt.Errorf("sync sample index outside sample table")
+				return format.Table{}, fmt.Errorf("sync sample index outside sample table")
 			}
 		}
 		if count == 0 {
@@ -197,26 +197,47 @@ func (p *parser) frames() ([]format.Row, error) {
 		}
 		scale, ok := t.row["timescale"].(uint32)
 		if !ok || scale == 0 {
-			return nil, fmt.Errorf("video samples require media timescale")
+			return format.Table{}, fmt.Errorf("video samples require media timescale")
 		}
-		var dts int64
-		for i, size := range s.sizes {
+		dts := make([]int64, count)
+		for i := 1; i < count; i++ {
 			if err := p.ctx.Err(); err != nil {
-				return nil, err
+				return format.Table{}, err
 			}
-			keyframe := s.sync == nil || s.sync[uint32(i+1)]
-			pts, duration := float64(dts+offsets[i])/float64(scale), float64(durations[i])/float64(scale)
-			row := format.Row{"path": p.s.Name, "track_id": t.row["track_id"], "sample_index": i + 1, "dts_seconds": float64(dts) / float64(scale), "pts_seconds": pts, "duration_seconds": duration, "size": size, "is_keyframe": keyframe, "offset": nil, "frame": nil}
-			if locations != nil {
-				row["offset"] = locations[i]
-				id, ok := t.row["track_id"].(uint32)
-				if ok {
-					row["frame"] = format.Frame{Type: "frame", Source: p.s.Name, TrackID: id, SampleIndex: i + 1, Offset: locations[i], Size: size, PTS: pts, Duration: duration}
+			dts[i] = dts[i-1] + durations[i-1]
+		}
+		name, trackID := p.s.Name, t.row["track_id"]
+		indexed := format.Table{Columns: table.Columns, Count: count, ValueAt: func(i int, column string) any {
+			pts, duration := float64(dts[i]+offsets[i])/float64(scale), float64(durations[i])/float64(scale)
+			switch column {
+			case "path":
+				return name
+			case "track_id":
+				return trackID
+			case "sample_index":
+				return i + 1
+			case "dts_seconds":
+				return float64(dts[i]) / float64(scale)
+			case "pts_seconds":
+				return pts
+			case "duration_seconds":
+				return duration
+			case "size":
+				return s.sizes[i]
+			case "is_keyframe":
+				return s.sync == nil || s.sync[uint32(i+1)]
+			case "offset":
+				if locations != nil {
+					return locations[i]
+				}
+			case "frame":
+				if id, ok := trackID.(uint32); ok && locations != nil {
+					return format.Frame{Type: "frame", Source: name, TrackID: id, SampleIndex: i + 1, Offset: locations[i], Size: s.sizes[i], PTS: pts, Duration: duration}
 				}
 			}
-			rows = append(rows, row)
-			dts += durations[i]
-		}
+			return nil
+		}}
+		table = format.Append(table, indexed)
 	}
-	return rows, nil
+	return table, nil
 }

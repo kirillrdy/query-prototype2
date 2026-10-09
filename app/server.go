@@ -28,7 +28,6 @@ import (
 var static embed.FS
 
 const maxResultRows = 500
-const maxUploadBytes = 1 << 30
 
 type FrameValue struct {
 	format.Frame
@@ -37,6 +36,8 @@ type FrameValue struct {
 	RawURL     string `json:"raw_url"`
 }
 type source struct {
+	mu             sync.RWMutex
+	indexGate      chan struct{}
 	id, path, name string
 	size           int64
 	modified       time.Time
@@ -68,6 +69,7 @@ func New(ctx context.Context, paths []string) (*Server, error) {
 	mux.HandleFunc("GET /api/info", s.info)
 	mux.HandleFunc("POST /api/query", s.query)
 	mux.HandleFunc("POST /api/upload", s.upload)
+	mux.HandleFunc("POST /api/source", s.openSource)
 	mux.HandleFunc("DELETE /api/source/{id}", s.removeSource)
 	mux.HandleFunc("POST /api/render", s.render)
 	mux.HandleFunc("GET /api/frame/{id}/preview", s.preview)
@@ -123,22 +125,14 @@ func (s *Server) addSource(ctx context.Context, path, name string) error {
 	if !a.Probe(input) {
 		return fmt.Errorf("unsupported format: select an MP4 or MOV file")
 	}
-	tables, err := a.Read(ctx, input)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return err
 	}
-	src := &source{id: hex.EncodeToString(random[:]), path: abs, name: name, size: stat.Size(), modified: stat.ModTime(), tables: tables, frames: map[string]format.Frame{}}
-	for _, row := range tables["frames"].Rows {
-		if frame, ok := row["frame"].(format.Frame); ok {
-			id := fmt.Sprintf("%s-%d-%d", src.id, frame.TrackID, frame.SampleIndex)
-			src.frames[id] = frame
-			row["frame"] = FrameValue{frame, id, "/api/frame/" + id + "/preview", "/api/frame/" + id + "/raw"}
-		}
-	}
+	src := &source{id: hex.EncodeToString(random[:]), path: abs, name: name, size: stat.Size(), modified: stat.ModTime(), tables: map[string]format.Table{}, frames: map[string]format.Frame{}, indexGate: make(chan struct{}, 1)}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.sources) >= 16 {
@@ -166,17 +160,22 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 		ID     string `json:"id"`
 		Name   string `json:"name"`
 		Size   int64  `json:"size"`
-		Frames int    `json:"frames"`
+		Frames *int   `json:"frames"`
 	}
 	items := make([]item, 0, len(s.sources))
 	for _, src := range s.sources {
-		items = append(items, item{src.id, src.name, src.size, len(src.tables["frames"].Rows)})
+		src.mu.RLock()
+		var count *int
+		if frames, ok := src.tables["frames"]; ok {
+			n := frames.Len()
+			count = &n
+		}
+		src.mu.RUnlock()
+		items = append(items, item{src.id, src.name, src.size, count})
 	}
 	schemas := map[string][]string{}
-	if len(s.sources) > 0 {
-		for name, t := range s.sources[0].tables {
-			schemas[name] = t.Columns
-		}
+	for name, t := range mp4.Schemas() {
+		schemas[name] = t.Columns
 	}
 	writeJSON(w, map[string]any{"sources": items, "schemas": schemas, "decoder_available": s.renderer.available(), "max_rows": maxResultRows})
 }
@@ -218,21 +217,26 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, fmt.Errorf("load a video first"))
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	tableName := q.SourceTable()
+	if _, ok := mp4.Schemas()[tableName]; !ok {
+		fail(w, 400, fmt.Errorf("unknown table %q", tableName))
+		return
+	}
 	tables := map[string]format.Table{}
 	for _, src := range sources {
 		if err := src.unchanged(); err != nil {
 			fail(w, 409, err)
 			return
 		}
-		for name, t := range src.tables {
-			merged := tables[name]
-			merged.Columns = t.Columns
-			merged.Rows = append(merged.Rows, t.Rows...)
-			tables[name] = merged
+		t, err := src.loadTable(ctx, tableName)
+		if err != nil {
+			fail(w, 400, fmt.Errorf("%s: %w", src.name, err))
+			return
 		}
+		tables[tableName] = format.Append(tables[tableName], t)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-	defer cancel()
 	functions := engine.Functions{"motion": video.Motion(s.renderer.decoder, s.resolveFrame)}
 	result, err := q.WithMaxRows(maxResultRows+1).ExecuteWith(ctx, tables, functions)
 	if err != nil {
@@ -250,7 +254,6 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	reader, err := r.MultipartReader()
 	if err != nil {
 		fail(w, 400, err)
@@ -304,7 +307,10 @@ func (s *Server) lookup(id string) (*source, format.Frame, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, src := range s.sources {
-		if frame, ok := src.frames[id]; ok {
+		src.mu.RLock()
+		frame, ok := src.frames[id]
+		src.mu.RUnlock()
+		if ok {
 			return src, frame, nil
 		}
 	}
@@ -416,4 +422,85 @@ func fail(w http.ResponseWriter, status int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+// loadTable serializes first indexing, permits canceled waiters, and only
+// publishes a complete index. A canceled or failed query can be retried.
+func (s *source) loadTable(ctx context.Context, name string) (format.Table, error) {
+	select {
+	case s.indexGate <- struct{}{}:
+		defer func() { <-s.indexGate }()
+	case <-ctx.Done():
+		return format.Table{}, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return format.Table{}, err
+	}
+	s.mu.RLock()
+	t, ok := s.tables[name]
+	s.mu.RUnlock()
+	if ok {
+		return t, nil
+	}
+	f, err := os.Open(s.path)
+	if err != nil {
+		return format.Table{}, err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return format.Table{}, err
+	}
+	if stat.Size() != s.size || !stat.ModTime().Equal(s.modified) {
+		return format.Table{}, fmt.Errorf("source changed since loading; open it again")
+	}
+	tables, err := (mp4.Adapter{}).ReadTables(ctx, format.Source{Name: s.name, Size: s.size, Reader: f}, name)
+	if err != nil {
+		return format.Table{}, err
+	}
+	if err := s.unchanged(); err != nil {
+		return format.Table{}, err
+	}
+	if frames, ok := tables["frames"]; ok {
+		// Only materialize identities when a query actually accesses frame values.
+		tables["frames"] = format.Table{Columns: frames.Columns, Count: frames.Len(), ValueAt: func(i int, c string) any {
+			value := frames.Value(i, c)
+			if frame, ok := value.(format.Frame); ok {
+				id := fmt.Sprintf("%s-%d-%d", s.id, frame.TrackID, frame.SampleIndex)
+				s.mu.Lock()
+				s.frames[id] = frame
+				s.mu.Unlock()
+				return FrameValue{frame, id, "/api/frame/" + id + "/preview", "/api/frame/" + id + "/raw"}
+			}
+			return value
+		}}
+	}
+	s.mu.Lock()
+	for key, t := range tables {
+		if _, exists := s.tables[key]; !exists {
+			s.tables[key] = t
+		}
+	}
+	t = s.tables[name]
+	s.mu.Unlock()
+	return t, nil
+}
+
+func (s *Server) openSource(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Path string `json:"path"`
+	}
+	if err := readJSON(w, r, &input); err != nil {
+		fail(w, 400, err)
+		return
+	}
+	if strings.TrimSpace(input.Path) == "" {
+		fail(w, 400, fmt.Errorf("enter a local file path"))
+		return
+	}
+	if err := s.addSource(r.Context(), input.Path, filepath.Base(input.Path)); err != nil {
+		fail(w, 400, err)
+		return
+	}
+	writeJSON(w, map[string]bool{"loaded": true})
 }

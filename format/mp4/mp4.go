@@ -43,13 +43,47 @@ type parser struct {
 	file         format.Row
 	sampleTracks []sampleTrack
 	mediaRanges  []byteRange
+	readFrames   bool
 }
 
 func (Adapter) Read(ctx context.Context, s format.Source) (map[string]format.Table, error) {
+	tables, err := (Adapter{}).ReadTables(ctx, s, "frames")
+	if err != nil {
+		return nil, err
+	}
+	t := tables["frames"]
+	rows := make([]format.Row, t.Len())
+	for i := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rows[i] = format.Row{}
+		for _, c := range t.Columns {
+			rows[i][c] = t.Value(i, c)
+		}
+	}
+	t.Rows, t.ValueAt, t.Count = rows, nil, 0
+	tables["frames"] = t
+	return tables, nil
+}
+
+// Schemas is available without opening or indexing a video.
+func Schemas() map[string]format.Table {
+	return map[string]format.Table{
+		"files":  {Columns: []string{"path", "format", "size", "major_brand", "duration_seconds", "track_count"}},
+		"tracks": {Columns: []string{"path", "track_id", "handler", "codec", "width", "height", "timescale", "duration_seconds"}},
+		"boxes":  {Columns: []string{"path", "box_path", "type", "offset", "size", "depth"}},
+		"frames": {Columns: []string{"path", "track_id", "sample_index", "dts_seconds", "pts_seconds", "duration_seconds", "size", "is_keyframe", "offset", "frame"}},
+	}
+}
+
+// ReadTables skips sample tables unless frames are requested. Frame columns
+// are produced from compact metadata on demand; media payloads are never read.
+func (Adapter) ReadTables(ctx context.Context, s format.Source, table string) (map[string]format.Table, error) {
 	if s.Size < 8 {
 		return nil, fmt.Errorf("file is too small for an MP4 box")
 	}
-	p := parser{ctx: ctx, s: s, file: format.Row{"path": s.Name, "format": "mp4", "size": s.Size, "major_brand": nil, "duration_seconds": nil}}
+	p := parser{ctx: ctx, s: s, readFrames: table == "frames", file: format.Row{"path": s.Name, "format": "mp4", "size": s.Size, "major_brand": nil, "duration_seconds": nil}}
 	if err := p.walk(0, s.Size, "", 0, nil, nil); err != nil {
 		return nil, err
 	}
@@ -63,16 +97,22 @@ func (Adapter) Read(ctx context.Context, s format.Source) (map[string]format.Tab
 		return nil, fmt.Errorf("missing moov box: no movie metadata available")
 	}
 	p.file["track_count"] = len(p.tracks)
-	frames, err := p.frames()
-	if err != nil {
-		return nil, err
+	tables := Schemas()
+	for name, rows := range map[string][]format.Row{"files": {p.file}, "tracks": p.tracks, "boxes": p.boxes} {
+		t := tables[name]
+		t.Rows = rows
+		tables[name] = t
 	}
-	return map[string]format.Table{
-		"files":  {Columns: []string{"path", "format", "size", "major_brand", "duration_seconds", "track_count"}, Rows: []format.Row{p.file}},
-		"tracks": {Columns: []string{"path", "track_id", "handler", "codec", "width", "height", "timescale", "duration_seconds"}, Rows: p.tracks},
-		"boxes":  {Columns: []string{"path", "box_path", "type", "offset", "size", "depth"}, Rows: p.boxes},
-		"frames": {Columns: []string{"path", "track_id", "sample_index", "dts_seconds", "pts_seconds", "duration_seconds", "size", "is_keyframe", "offset", "frame"}, Rows: frames},
-	}, nil
+	if p.readFrames {
+		frames, err := p.frameTable()
+		if err != nil {
+			return nil, err
+		}
+		tables["frames"] = frames
+	} else {
+		delete(tables, "frames")
+	}
+	return tables, nil
 }
 
 func (p *parser) bytes(offset, size int64) ([]byte, error) {
@@ -159,7 +199,7 @@ func (p *parser) walk(start, end int64, parent string, depth int, track format.R
 func (p *parser) metadata(b box, track format.Row, samples *sampleTable) error {
 	switch b.kind {
 	case "stts", "ctts", "stsz", "stss", "stsc", "stco", "co64":
-		if samples != nil {
+		if samples != nil && p.readFrames {
 			return p.sampleMetadata(b, samples)
 		}
 		return nil

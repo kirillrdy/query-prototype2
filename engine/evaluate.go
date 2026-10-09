@@ -13,7 +13,7 @@ import (
 
 type evaluation struct {
 	ctx       context.Context
-	rows      []format.Row
+	rows      format.Table
 	functions Functions
 	cache     map[*expression]map[int]any
 	windows   map[*window]*layout
@@ -23,7 +23,7 @@ type layout struct {
 	group, rank []int
 }
 
-func newEvaluation(ctx context.Context, rows []format.Row, functions Functions) *evaluation {
+func newEvaluation(ctx context.Context, rows format.Table, functions Functions) *evaluation {
 	return &evaluation{ctx: ctx, rows: rows, functions: functions, cache: map[*expression]map[int]any{}, windows: map[*window]*layout{}}
 }
 func indices(n int) []int {
@@ -50,7 +50,7 @@ func (e *evaluation) evaluate(expr *expression, active []int) ([]any, error) {
 				}
 			}
 			if expr.kind == "column" {
-				out[i] = e.rows[row][expr.name]
+				out[i] = e.rows.Value(row, expr.name)
 			} else {
 				out[i] = expr.value
 			}
@@ -168,9 +168,9 @@ func (e *evaluation) layout(w *window) (*layout, error) {
 	if cached := e.windows[w]; cached != nil {
 		return cached, nil
 	}
-	l := &layout{group: make([]int, len(e.rows)), rank: make([]int, len(e.rows))}
+	l := &layout{group: make([]int, e.rows.Len()), rank: make([]int, e.rows.Len())}
 	groups := map[string]int{}
-	for i, row := range e.rows {
+	for i := 0; i < e.rows.Len(); i++ {
 		if i%1024 == 0 {
 			if err := e.ctx.Err(); err != nil {
 				return nil, err
@@ -178,7 +178,7 @@ func (e *evaluation) layout(w *window) (*layout, error) {
 		}
 		parts := make([]string, len(w.partition))
 		for j, c := range w.partition {
-			key, err := scalarKey(row[c])
+			key, err := scalarKey(e.rows.Value(i, c))
 			if err != nil {
 				return nil, fmt.Errorf("PARTITION BY %s: %w", c, err)
 			}
@@ -196,9 +196,9 @@ func (e *evaluation) layout(w *window) (*layout, error) {
 	}
 	values := make([][]any, len(w.order))
 	for j, o := range w.order {
-		values[j] = make([]any, len(e.rows))
-		for i, row := range e.rows {
-			values[j][i] = row[o.column]
+		values[j] = make([]any, e.rows.Len())
+		for i := 0; i < e.rows.Len(); i++ {
+			values[j][i] = e.rows.Value(i, o.column)
 		}
 	}
 	for _, group := range l.groups {

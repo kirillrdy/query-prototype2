@@ -6,7 +6,8 @@
 <main>
 <aside class="sidebar">
  <div class="eyebrow">SOURCES</div><label class="upload" for="upload">＋ Open video<input id="upload" type="file" accept=".mp4,.mov,video/mp4,video/quicktime" multiple></label>
- <p class="muted compact">MP4 / MOV · Files stay on this machine.</p><div id="sources" class="sources"></div>
+ <form id="local-source" class="local-source"><label for="local-path">Open local path</label><input id="local-path" type="text" placeholder="/path/to/video.mp4" required><button id="open-path" type="submit">Open in place</button></form>
+ <p class="muted compact">MP4 / MOV · Read when you run a query. Local paths avoid uploading a copy.</p><div id="sources" class="sources"></div>
  <div class="eyebrow schema-title">TABLES &amp; COLUMNS</div><div id="schema"></div>
  <div class="sidebar-foot">Query the structure.<br>See the frames.</div>
 </aside>

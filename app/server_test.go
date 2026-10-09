@@ -138,7 +138,10 @@ func TestRawBinaryDownloadAndSourceChanges(t *testing.T) {
 
 func TestResultCapAndNoDecoder(t *testing.T) {
 	s := newTestServer(t, emptyMovie(t))
-	table := s.sources[0].tables["files"]
+	table, err := s.sources[0].loadTable(context.Background(), "files")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < maxResultRows+10; i++ {
 		table.Rows = append(table.Rows, format.Row{"path": "sample"})
 	}

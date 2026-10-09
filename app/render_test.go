@@ -72,8 +72,9 @@ func TestRenderedSelectionMatchesPicturesAndRawBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var ordered []FrameValue
-	for _, r := range s.sources[0].tables["frames"].Rows {
-		ordered = append(ordered, r["frame"].(FrameValue))
+	indexed := s.sources[0].tables["frames"]
+	for i := 0; i < indexed.Len(); i++ {
+		ordered = append(ordered, indexed.Value(i, "frame").(FrameValue))
 	}
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].PTS < ordered[j].PTS })
 	ordinals := map[string]int{}
