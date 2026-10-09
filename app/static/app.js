@@ -1,6 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const examples = {
+	 motion: "SELECT frame, pts_seconds,\n  motion(frame, LAG(frame) OVER (\n    PARTITION BY path, track_id\n    ORDER BY pts_seconds, sample_index\n  )) AS motion_score\nFROM frames\nORDER BY path, track_id, pts_seconds\nLIMIT 100",
   mixed: "SELECT frame, path, sample_index, pts_seconds\nFROM frames\nLIMIT 48",
   keyframes: "SELECT frame, path, pts_seconds, size\nFROM frames\nWHERE is_keyframe = true\nLIMIT 100",
   tracks: "SELECT path, track_id, handler, codec, width, height\nFROM tracks"
@@ -158,7 +159,7 @@ async function play() {
 function move(next) { stop(); if (!queue.length) return; position = Math.max(0, Math.min(queue.length - 1, next)); updatePosition(); show(queue[position]).catch(e => message(e.message, "error")); }
 $("run").addEventListener("click", runQuery);
 $("sql").addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); runQuery(); } });
-document.querySelectorAll("[data-example]").forEach(button => button.addEventListener("click", () => { $("sql").value = examples[button.dataset.example]; $("sql").focus(); }));
+document.querySelectorAll("[data-example]").forEach(button => button.addEventListener("click", () => { $("sql").value = examples[button.dataset.example]; $("sql").style.height = Math.max(130, $("sql").value.split("\n").length * 25 + 32) + "px"; $("sql").focus(); }));
 $("play").addEventListener("click", play); $("previous").addEventListener("click", () => move(position - 1)); $("next").addEventListener("click", () => move(position + 1)); $("scrub").addEventListener("input", () => move(Number($("scrub").value)));
 $("order").addEventListener("change", () => { updateQueue(); if (queue.length) move(0); });
 $("upload").addEventListener("change", async () => {

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"binaryquery/format"
+	"binaryquery/video"
 )
 
 func request(s *Server, method, path string, data []byte) *httptest.ResponseRecorder {
@@ -153,7 +154,7 @@ func TestResultCapAndNoDecoder(t *testing.T) {
 	if len(result.Rows) != maxResultRows || !result.Truncated {
 		t.Fatalf("cap: %d %v", len(result.Rows), result.Truncated)
 	}
-	s.renderer.ffmpeg = ""
+	s.renderer.decoder = &video.Decoder{}
 	if err := s.renderer.prepare(context.Background(), s.sources[0], 1, nil); err == nil {
 		t.Fatal("missing decoder must fail clearly")
 	}

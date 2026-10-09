@@ -39,7 +39,7 @@ func TestQuery(t *testing.T) {
 }
 
 func TestInvalidQueriesAndSchema(t *testing.T) {
-	for _, sql := range []string{"", "SELECT FROM frames", "SELECT * FROM frames LIMIT -1", "SELECT * FROM frames WHERE size = nope", "SELECT * FROM frames WHERE path = 'open", "SELECT * FROM frames ORDER BY size", "SELECT path,path FROM frames", "SELECT * FROM frames; DROP TABLE frames"} {
+	for _, sql := range []string{"", "SELECT FROM frames", "SELECT * FROM frames LIMIT -1", "SELECT * FROM frames WHERE size = )", "SELECT * FROM frames WHERE path = 'open", "SELECT * FROM frames ORDER BY", "SELECT path,path FROM frames", "SELECT * FROM frames; DROP TABLE frames"} {
 		if _, err := Parse(sql); err == nil {
 			t.Fatalf("accepted %q", sql)
 		}

@@ -1,335 +1,237 @@
-// Package engine implements a small SQL subset over adapter-provided tables.
+// Package engine evaluates a SQL subset over adapter-provided tables.
 package engine
 
 import (
+	"binaryquery/format"
 	"context"
 	"fmt"
-	"math/big"
-	"strconv"
-	"strings"
-	"unicode"
-
-	"binaryquery/format"
 )
 
-type predicate struct {
-	column, op string
-	value      any
-}
 type Query struct {
 	table      string
-	columns    []string
+	subquery   *Query
+	selects    []selection
+	star       bool
 	predicates []predicate
+	order      []orderTerm
 	limit      int
+}
+type selection struct {
+	expression *expression
+	name       string
+}
+type predicate struct {
+	left, right *expression
+	op          string
+}
+type orderTerm struct {
+	column           string
+	desc, nullsFirst bool
+}
+type expression struct {
+	kind, name string
+	value      any
+	args       []*expression
+	window     *window
+}
+type window struct {
+	partition []string
+	order     []orderTerm
 }
 type Result struct {
 	Columns []string     `json:"columns"`
 	Rows    []format.Row `json:"rows"`
 }
-type token struct {
-	text   string
-	quoted bool
-}
 
-// WithMaxRows applies a caller's resource limit while retaining a smaller SQL LIMIT.
+// Function evaluates a batch of argument tuples, returning one value per tuple.
+// Batch evaluation lets expensive binary functions decode distinct frames once.
+type Function struct {
+	Arity    int
+	Evaluate func(context.Context, [][]any) ([]any, error)
+}
+type Functions map[string]Function
+
+// WithMaxRows caps the final result, leaving window inputs and subqueries intact.
 func (q Query) WithMaxRows(max int) Query {
 	if max >= 0 && (q.limit < 0 || q.limit > max) {
 		q.limit = max
 	}
 	return q
 }
-
-// Parse accepts SELECT columns FROM table [WHERE comparisons joined by AND]
-// [LIMIT nonnegative-integer]. Strings use SQL single quotes and ” escaping.
-func Parse(sql string) (Query, error) {
-	if len(sql) > 65536 {
-		return Query{}, fmt.Errorf("query exceeds 65536 bytes")
-	}
-	tokens, err := lex(sql)
-	if err != nil {
-		return Query{}, err
-	}
-	i := 0
-	peek := func(s string) bool {
-		return i < len(tokens) && !tokens[i].quoted && strings.EqualFold(tokens[i].text, s)
-	}
-	take := func(s string) error {
-		if !peek(s) {
-			return fmt.Errorf("expected %s at token %d", s, i+1)
-		}
-		i++
-		return nil
-	}
-	identifier := func() (string, error) {
-		if i >= len(tokens) || tokens[i].quoted || !isIdentifier(tokens[i].text) {
-			return "", fmt.Errorf("expected identifier at token %d", i+1)
-		}
-		s := strings.ToLower(tokens[i].text)
-		i++
-		return s, nil
-	}
-	q := Query{limit: -1}
-	if err := take("SELECT"); err != nil {
-		return q, err
-	}
-	if peek("*") {
-		i++
-	} else {
-		seen := map[string]bool{}
-		for {
-			c, err := identifier()
-			if err != nil {
-				return q, err
-			}
-			if seen[c] {
-				return q, fmt.Errorf("duplicate selected column %q", c)
-			}
-			seen[c] = true
-			q.columns = append(q.columns, c)
-			if !peek(",") {
-				break
-			}
-			i++
-		}
-	}
-	if err := take("FROM"); err != nil {
-		return q, err
-	}
-	q.table, err = identifier()
-	if err != nil {
-		return q, err
-	}
-	if peek("WHERE") {
-		i++
-		for {
-			c, err := identifier()
-			if err != nil {
-				return q, err
-			}
-			if i >= len(tokens) {
-				return q, fmt.Errorf("missing comparison operator")
-			}
-			op := tokens[i].text
-			if tokens[i].quoted || !strings.Contains("|=|!=|<>|<|<=|>|>=|", "|"+op+"|") {
-				return q, fmt.Errorf("unsupported operator %q", op)
-			}
-			i++
-			if i >= len(tokens) {
-				return q, fmt.Errorf("missing comparison value")
-			}
-			t := tokens[i]
-			i++
-			var value any
-			if t.quoted {
-				value = t.text
-			} else if strings.EqualFold(t.text, "true") || strings.EqualFold(t.text, "false") {
-				value = strings.EqualFold(t.text, "true")
-			} else {
-				// Store numeric literals exactly, including offsets above 2^53.
-				if len(t.text) > 128 {
-					return q, fmt.Errorf("numeric literal exceeds 128 bytes")
-				}
-				if e := strings.IndexAny(t.text, "eE"); e >= 0 {
-					exponent, err := strconv.Atoi(t.text[e+1:])
-					if err != nil || exponent < -400 || exponent > 400 {
-						return q, fmt.Errorf("numeric exponent must be between -400 and 400")
-					}
-				}
-				if _, err := strconv.ParseFloat(t.text, 64); err != nil {
-					return q, fmt.Errorf("expected number or single-quoted string, got %q", t.text)
-				}
-				r, ok := new(big.Rat).SetString(t.text)
-				if !ok {
-					return q, fmt.Errorf("invalid numeric literal %q", t.text)
-				}
-				value = r
-			}
-			q.predicates = append(q.predicates, predicate{c, op, value})
-			if !peek("AND") {
-				break
-			}
-			i++
-		}
-	}
-	if peek("LIMIT") {
-		i++
-		if i >= len(tokens) || tokens[i].quoted {
-			return q, fmt.Errorf("missing LIMIT integer")
-		}
-		q.limit, err = strconv.Atoi(tokens[i].text)
-		if err != nil || q.limit < 0 {
-			return q, fmt.Errorf("LIMIT must be a nonnegative integer")
-		}
-		i++
-	}
-	if peek(";") {
-		i++
-	}
-	if i != len(tokens) {
-		return q, fmt.Errorf("unexpected token %q", tokens[i].text)
-	}
-	return q, nil
-}
-
-func isIdentifier(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i, c := range s {
-		if c != '_' && !unicode.IsLetter(c) && !(i > 0 && unicode.IsDigit(c)) {
-			return false
-		}
-	}
-	return true
-}
-
-func lex(s string) ([]token, error) {
-	var out []token
-	for i := 0; i < len(s); {
-		if s[i] == ' ' || s[i] == '\n' || s[i] == '\r' || s[i] == '\t' {
-			i++
-			continue
-		}
-		if s[i] == '\'' {
-			i++
-			var b strings.Builder
-			closed := false
-			for i < len(s) {
-				if s[i] == '\'' {
-					i++
-					if i < len(s) && s[i] == '\'' {
-						b.WriteByte('\'')
-						i++
-						continue
-					}
-					closed = true
-					break
-				}
-				b.WriteByte(s[i])
-				i++
-			}
-			if !closed {
-				return nil, fmt.Errorf("unterminated string")
-			}
-			out = append(out, token{b.String(), true})
-			continue
-		}
-		start := i
-		if strings.ContainsRune(",*;=<>!", rune(s[i])) {
-			i++
-			if i < len(s) && (s[i] == '=' || (s[start] == '<' && s[i] == '>')) && strings.ContainsRune("<>!", rune(s[start])) {
-				i++
-			}
-		} else {
-			for i < len(s) && !strings.ContainsRune(" \t\r\n,*;=<>!'", rune(s[i])) {
-				i++
-			}
-		}
-		out = append(out, token{text: s[start:i]})
-	}
-	return out, nil
-}
-
 func (q Query) Execute(ctx context.Context, tables map[string]format.Table) (Result, error) {
-	t, ok := tables[q.table]
-	if !ok {
-		return Result{}, fmt.Errorf("unknown table %q", q.table)
+	return q.ExecuteWith(ctx, tables, nil)
+}
+func (q Query) ExecuteWith(ctx context.Context, tables map[string]format.Table, functions Functions) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	var table format.Table
+	if q.subquery != nil {
+		r, err := q.subquery.ExecuteWith(ctx, tables, functions)
+		if err != nil {
+			return Result{}, err
+		}
+		table = format.Table{Columns: r.Columns, Rows: r.Rows}
+	} else {
+		var ok bool
+		table, ok = tables[q.table]
+		if !ok {
+			return Result{}, fmt.Errorf("unknown table %q", q.table)
+		}
 	}
 	known := map[string]bool{}
-	for _, c := range t.Columns {
+	for _, c := range table.Columns {
 		known[c] = true
 	}
-	columns := q.columns
-	if len(columns) == 0 {
-		columns = t.Columns
+	selects := q.selects
+	if q.star {
+		selects = make([]selection, len(table.Columns))
+		for i, c := range table.Columns {
+			selects[i] = selection{&expression{kind: "column", name: c}, c}
+		}
 	}
-	for _, c := range columns {
-		if !known[c] {
-			return Result{}, fmt.Errorf("unknown column %q in %s", c, q.table)
+	for _, s := range selects {
+		if err := validate(s.expression, known, functions, true); err != nil {
+			return Result{}, err
 		}
 	}
 	for _, p := range q.predicates {
-		if !known[p.column] {
-			return Result{}, fmt.Errorf("unknown column %q in %s", p.column, q.table)
-		}
-	}
-	r := Result{Columns: append([]string(nil), columns...), Rows: make([]format.Row, 0)}
-	for _, row := range t.Rows {
-		if err := ctx.Err(); err != nil {
+		if err := validate(p.left, known, functions, false); err != nil {
 			return Result{}, err
 		}
-		if q.limit >= 0 && len(r.Rows) >= q.limit {
-			break
+		if p.right != nil {
+			if err := validate(p.right, known, functions, false); err != nil {
+				return Result{}, err
+			}
 		}
-		match := true
+	}
+	aliases := map[string]*expression{}
+	columns := make([]string, len(selects))
+	for i, s := range selects {
+		aliases[s.name] = s.expression
+		columns[i] = s.name
+	}
+	for _, o := range q.order {
+		if !known[o.column] && aliases[o.column] == nil {
+			return Result{}, fmt.Errorf("unknown ORDER BY column %q", o.column)
+		}
+	}
+	rows := table.Rows
+	if len(q.predicates) > 0 {
+		input := newEvaluation(ctx, rows, functions)
+		active := indices(len(rows))
+		matched := make([]bool, len(rows))
+		for i := range matched {
+			matched[i] = true
+		}
 		for _, p := range q.predicates {
-			if !matches(row[p.column], p) {
-				match = false
-				break
+			left, err := input.evaluate(p.left, active)
+			if err != nil {
+				return Result{}, err
+			}
+			var right []any
+			if p.right != nil {
+				right, err = input.evaluate(p.right, active)
+				if err != nil {
+					return Result{}, err
+				}
+			}
+			for i, v := range left {
+				if i%1024 == 0 {
+					if err := ctx.Err(); err != nil {
+						return Result{}, err
+					}
+				}
+				match := false
+				if p.op == "IS NULL" {
+					match = v == nil
+				} else if p.op == "IS NOT NULL" {
+					match = v != nil
+				} else if v != nil && right[i] != nil {
+					cmp, compatible := compare(v, right[i])
+					match = compatible && compareOp(cmp, p.op)
+				}
+				matched[i] = matched[i] && match
 			}
 		}
-		if match {
-			projected := format.Row{}
-			for _, c := range columns {
-				projected[c] = row[c]
+		rows = make([]format.Row, 0)
+		for i, row := range table.Rows {
+			if matched[i] {
+				rows = append(rows, row)
 			}
-			r.Rows = append(r.Rows, projected)
 		}
 	}
-	return r, nil
+	e := newEvaluation(ctx, rows, functions)
+	active := indices(len(rows))
+	if len(q.order) > 0 {
+		values := make([][]any, len(q.order))
+		for i, o := range q.order {
+			expr := aliases[o.column]
+			if expr == nil {
+				expr = &expression{kind: "column", name: o.column}
+			}
+			v, err := e.evaluate(expr, active)
+			if err != nil {
+				return Result{}, err
+			}
+			values[i] = v
+		}
+		if err := sortIndices(ctx, active, values, q.order); err != nil {
+			return Result{}, err
+		}
+	}
+	if q.limit >= 0 && len(active) > q.limit {
+		active = active[:q.limit]
+	}
+	result := Result{Columns: columns, Rows: make([]format.Row, len(active))}
+	for i := range result.Rows {
+		result.Rows[i] = format.Row{}
+	}
+	for _, s := range selects {
+		values, err := e.evaluate(s.expression, active)
+		if err != nil {
+			return Result{}, err
+		}
+		for i, v := range values {
+			result.Rows[i][s.name] = v
+		}
+	}
+	return result, nil
 }
-
-func matches(value any, p predicate) bool {
-	if value == nil {
-		return false
+func validate(e *expression, known map[string]bool, functions Functions, allowWindow bool) error {
+	switch e.kind {
+	case "column":
+		if !known[e.name] {
+			return fmt.Errorf("unknown column %q", e.name)
+		}
+	case "call":
+		f, ok := functions[e.name]
+		if !ok || f.Evaluate == nil {
+			return fmt.Errorf("unknown function %q", e.name)
+		}
+		if len(e.args) != f.Arity {
+			return fmt.Errorf("%s expects %d arguments", e.name, f.Arity)
+		}
+	case "lag":
+		if !allowWindow {
+			return fmt.Errorf("LAG is not allowed here; use a subquery to filter window results")
+		}
+		for _, c := range e.window.partition {
+			if !known[c] {
+				return fmt.Errorf("unknown PARTITION BY column %q", c)
+			}
+		}
+		for _, o := range e.window.order {
+			if !known[o.column] {
+				return fmt.Errorf("unknown window ORDER BY column %q", o.column)
+			}
+		}
+		allowWindow = false
 	}
-	var cmp int
-	switch literal := p.value.(type) {
-	case bool:
-		b, ok := value.(bool)
-		if !ok {
-			return false
+	for _, a := range e.args {
+		if err := validate(a, known, functions, allowWindow); err != nil {
+			return err
 		}
-		if b == literal {
-			cmp = 0
-		} else if b {
-			cmp = 1
-		} else {
-			cmp = -1
-		}
-	case string:
-		s, ok := value.(string)
-		if !ok {
-			return false
-		}
-		cmp = strings.Compare(s, literal)
-	case *big.Rat:
-		switch value.(type) {
-		case int, int32, int64, uint, uint32, uint64, float32, float64:
-		default:
-			return false
-		}
-		n, ok := new(big.Rat).SetString(fmt.Sprint(value))
-		if !ok {
-			return false
-		}
-		cmp = n.Cmp(literal)
-	default:
-		return false
 	}
-	switch p.op {
-	case "=":
-		return cmp == 0
-	case "!=", "<>":
-		return cmp != 0
-	case "<":
-		return cmp < 0
-	case "<=":
-		return cmp <= 0
-	case ">":
-		return cmp > 0
-	case ">=":
-		return cmp >= 0
-	}
-	return false
+	return nil
 }

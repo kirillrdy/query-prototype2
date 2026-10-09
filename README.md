@@ -55,6 +55,77 @@ Files passed on the command line are read in place; changes detected after
 loading require restarting or uploading again. Decoder work is serialized and
 has a two-minute timeout per render request.
 
+## Functions over frames
+
+Both the CLI and workbench support expressions, `AS` aliases, `LAG` windows,
+derived-table subqueries, and result ordering. Use the **Motion** example in the
+query editor, or run:
+
+```sql
+SELECT frame, pts_seconds,
+       motion(frame, LAG(frame) OVER (
+         PARTITION BY path, track_id
+         ORDER BY pts_seconds, sample_index
+       )) AS motion_score
+FROM frames
+ORDER BY path, track_id, pts_seconds
+LIMIT 100
+```
+
+`motion(a, b)` measures visual change as normalized mean absolute pixel
+difference. Frames are decoded at exact sample positions into lossless 160 × 90
+grayscale buffers; the score is `sum(abs(a - b)) / (160 * 90 * 255)`. Zero means
+identical grayscale buffers; one means maximal difference. Resizing uses a
+fixed analysis size. Changes in lighting and camera position also affect the
+score, so it is a visual-change measure rather than a count of moving objects.
+It returns null if either argument is null. Decoding requires FFmpeg/FFprobe;
+`LAG` alone only moves references and needs no decoder.
+
+`LAG(value [, offset [, default]]) OVER (...)` returns the value from an earlier
+row in the same partition. Offset defaults to 1, must be a nonnegative integer
+or null, and may be a column expression; 0 returns the current row. Out-of-range
+rows return the default, or null if omitted. A null offset returns null. Null
+values are respected, not skipped. Partition and order clauses are optional;
+without ordering, rows follow their input order. Equal order keys retain input
+order; include `sample_index` to make presentation-time ordering explicit.
+Window ordering does not itself reorder the final results.
+
+`WHERE` filters **before** window evaluation, and the final `LIMIT` applies
+**after** window evaluation. To keep the preceding frame from outside a time
+range, compute the window in a subquery and filter outside it. This also lets
+you use the name `previous_frame` as an argument:
+
+```sql
+SELECT frame, pts_seconds, motion(frame, previous_frame) AS motion_score
+FROM (
+  SELECT frame, pts_seconds,
+         LAG(frame) OVER (
+           PARTITION BY path, track_id
+           ORDER BY pts_seconds, sample_index
+         ) AS previous_frame
+  FROM frames
+) AS sequenced
+WHERE pts_seconds >= 1 AND pts_seconds < 2
+ORDER BY pts_seconds
+LIMIT 100
+```
+
+Aliases cannot refer to another expression in the same SELECT list. Use the
+direct nested call or a subquery as above. To filter on `motion_score`, put its
+calculation in a subquery and apply `WHERE motion_score > 0.05` outside it.
+Like other window functions, LAG cannot appear in WHERE or inside another LAG.
+Result ordering accepts input column names and output aliases, with ASC/DESC and
+NULLS FIRST/LAST (defaults: LAST for ASC, FIRST for DESC).
+
+Scalar functions use the engine's `Functions` registry and evaluate batches of
+argument tuples. Motion deduplicates frame references and decodes each source
+track in a batch; the grayscale cache is shared with the preview decoder's
+sample index. With a simple SELECT and LIMIT, only frames needed for the result
+are decoded. Filtering or ordering by a computed score may require evaluating
+more rows. A motion batch is capped at 4,096 distinct frames; narrow the input
+range or use LIMIT before expensive calculations for larger videos. Queries
+using decoding have a two-minute timeout. Window/subquery rows are materialized.
+
 ## Run
 
 Requires Go 1.26 or newer. No external Go dependencies.
@@ -105,23 +176,31 @@ values. In the web API, frame values also include opaque IDs and preview/raw URL
 ## Query language
 
 ```text
-SELECT * | column [, column ...]
-FROM files | tracks | boxes | frames
-[WHERE column operator literal [AND column operator literal ...]]
+SELECT * | expression [AS alias] [, expression [AS alias] ...]
+FROM table | (SELECT ...) AS alias
+[WHERE expression operator expression [AND ...]]
+[ORDER BY column_or_alias [ASC | DESC] [NULLS FIRST | LAST] [, ...]]
 [LIMIT nonnegative_integer]
 ```
 
 Keywords and identifiers are case insensitive. Operators: `=`, `!=`, `<>`, `<`,
-`<=`, `>`, `>=`. Literals are numbers, `true`/`false`, or single-quoted strings (escape a quote
+`<=`, `>`, `>=`; `IS NULL` and `IS NOT NULL` are also supported. Literals are
+numbers, `null`, `true`/`false`, or single-quoted strings (escape a quote
 as `''`). Comparisons are type-sensitive; null values never match. A trailing
-semicolon is accepted. No joins, aggregation, OR, aliases, ordering, or SQL
-functions yet. Row order follows input order and box traversal order.
+semicolon is accepted. Expressions support columns, literals, registered scalar
+functions (currently `motion`), and `LAG(...) OVER (...)`. No joins, aggregation,
+OR, arithmetic operators, CTEs, qualified/quoted identifiers, named windows,
+window-frame clauses, or other window functions yet. Subqueries require an
+alias. Row order follows input order unless a final ORDER BY is supplied.
 
 ## Architecture and boundaries
 
 - `format`: source, schema, row, and adapter interfaces.
 - `format/mp4`: bounded box traversal, headers, sample descriptions, and sample timing.
-- `engine`: query parsing, schema validation, filtering, projection, and limit.
+- `engine`: expressions, schema validation, filtering, LAG windows, batch
+  function evaluation, subqueries, ordering, projection, and limit.
+- `video`: reusable exact-sample decoder, preview/grayscale representations,
+  and the motion scalar function.
 - `cmd/bquery`: local-file adapter selection and JSON output.
 - `app`: embedded HTML/CSS/JS workbench, uploads, JSON query API, exact raw
   sample downloads, and FFmpeg preview rendering.
@@ -151,8 +230,12 @@ query parsing; there is no semantic search of video contents. Format detection u
 followed by structural validation and a required movie box.
 
 To add a format, implement `format.Adapter` and register it in the CLI. Future
-work: fragmented video support, streaming scans and
-pushdown, then additional format adapters.
+work: fragmented video support, streaming scans and pushdown, more frame
+functions, then additional format adapters.
+
+Window semantics follow the SQL behavior documented in
+[PostgreSQL LAG](https://www.postgresql.org/docs/current/functions-window.html)
+and its [window evaluation tutorial](https://www.postgresql.org/docs/current/tutorial-window.html).
 
 Format references: [Apple QuickTime atoms](https://developer.apple.com/documentation/quicktime-file-format/atoms),
 [track header](https://developer.apple.com/documentation/quicktime-file-format/track_header_atom),

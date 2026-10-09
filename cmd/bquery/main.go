@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"time"
 
 	"binaryquery/engine"
 	"binaryquery/format"
 	"binaryquery/format/mp4"
+	"binaryquery/video"
 )
 
 func main() {
@@ -56,13 +60,73 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) error {
 			tables[name] = existing
 		}
 	}
-	result, err := q.Execute(ctx, tables)
+	result, err := execute(ctx, q, tables)
 	if err != nil {
 		return err
 	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(result)
+}
+
+func execute(ctx context.Context, q engine.Query, tables map[string]format.Table) (engine.Result, error) {
+	var decoder *video.Decoder
+	var temp string
+	defer func() {
+		if temp != "" {
+			os.RemoveAll(temp)
+		}
+	}()
+	var refs map[format.Frame]video.Reference
+	resolve := func(value any) (video.Reference, error) {
+		frame, ok := value.(format.Frame)
+		if !ok {
+			return video.Reference{}, fmt.Errorf("motion expects frame values, got %T", value)
+		}
+		ref, ok := refs[frame]
+		if !ok {
+			return video.Reference{}, fmt.Errorf("unknown frame")
+		}
+		return ref, nil
+	}
+	functions := engine.Functions{"motion": {Arity: 2, Evaluate: func(callCtx context.Context, args [][]any) ([]any, error) {
+		if decoder == nil {
+			var err error
+			temp, err = os.MkdirTemp("", "binaryquery-functions-")
+			if err != nil {
+				return nil, err
+			}
+			decoder = video.NewDecoder(temp)
+			refs = map[format.Frame]video.Reference{}
+			sources := map[string]video.Source{}
+			for _, row := range tables["frames"].Rows {
+				frame, ok := row["frame"].(format.Frame)
+				if !ok {
+					continue
+				}
+				source, exists := sources[frame.Source]
+				if !exists {
+					path, err := filepath.Abs(frame.Source)
+					if err != nil {
+						return nil, err
+					}
+					stat, err := os.Stat(path)
+					if err != nil {
+						return nil, err
+					}
+					hash := sha256.Sum256([]byte(path))
+					source = video.Source{Key: fmt.Sprintf("%x", hash[:16]), Path: path, Size: stat.Size(), Modified: stat.ModTime()}
+					sources[frame.Source] = source
+				}
+				id := fmt.Sprintf("%s-%d-%d", source.Key, frame.TrackID, frame.SampleIndex)
+				refs[frame] = video.Reference{ID: id, Source: source, Frame: frame}
+			}
+		}
+		return video.Motion(decoder, resolve).Evaluate(callCtx, args)
+	}}}
+	bounded, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return q.ExecuteWith(bounded, tables, functions)
 }
 
 func readSource(ctx context.Context, path string, adapters []format.Adapter) (map[string]format.Table, error) {

@@ -21,6 +21,7 @@ import (
 	"binaryquery/engine"
 	"binaryquery/format"
 	"binaryquery/format/mp4"
+	"binaryquery/video"
 )
 
 //go:embed static/*
@@ -230,7 +231,10 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 			tables[name] = merged
 		}
 	}
-	result, err := q.WithMaxRows(maxResultRows+1).Execute(r.Context(), tables)
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	functions := engine.Functions{"motion": video.Motion(s.renderer.decoder, s.resolveFrame)}
+	result, err := q.WithMaxRows(maxResultRows+1).ExecuteWith(ctx, tables, functions)
 	if err != nil {
 		fail(w, 400, err)
 		return
