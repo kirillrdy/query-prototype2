@@ -31,6 +31,14 @@ type token struct {
 	quoted bool
 }
 
+// WithMaxRows applies a caller's resource limit while retaining a smaller SQL LIMIT.
+func (q Query) WithMaxRows(max int) Query {
+	if max >= 0 && (q.limit < 0 || q.limit > max) {
+		q.limit = max
+	}
+	return q
+}
+
 // Parse accepts SELECT columns FROM table [WHERE comparisons joined by AND]
 // [LIMIT nonnegative-integer]. Strings use SQL single quotes and ” escaping.
 func Parse(sql string) (Query, error) {

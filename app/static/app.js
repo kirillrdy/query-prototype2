@@ -1,0 +1,175 @@
+"use strict";
+const $ = id => document.getElementById(id);
+const examples = {
+  mixed: "SELECT frame, path, sample_index, pts_seconds\nFROM frames\nLIMIT 48",
+  keyframes: "SELECT frame, path, pts_seconds, size\nFROM frames\nWHERE is_keyframe = true\nLIMIT 100",
+  tracks: "SELECT path, track_id, handler, codec, width, height\nFROM tracks"
+};
+let result = { columns: [], rows: [] }, selection = new Set(), queue = [], position = 0;
+let generation = 0, previewVersion = 0, playbackVersion = 0, playing = false, decoderAvailable = false;
+const ready = new Set(), images = new Map();
+const frameValues = row => Object.values(row).filter(v => v && typeof v === "object" && v.type === "frame" && v.id);
+function message(text, kind = "") { $("message").textContent = text; $("message").className = "message " + kind; }
+function text(tag, value, className) { const el = document.createElement(tag); el.textContent = value; if (className) el.className = className; return el; }
+async function api(path, body, method) {
+  const response = await fetch(path, body ? { method: method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : method ? { method } : {});
+  const data = await response.json(); if (!response.ok) throw new Error(data.error || "Request failed"); return data;
+}
+async function refreshInfo() {
+  const info = await api("/api/info"); decoderAvailable = info.decoder_available;
+  $("decoder-note").hidden = decoderAvailable; $("sources").replaceChildren();
+  for (const src of info.sources) {
+    const item = text("div", "", "source"), heading = text("div", "", "source-heading"), remove = text("button", "×", "remove-source");
+    remove.title = `Remove ${src.name} from this session`; remove.setAttribute("aria-label", `Remove ${src.name}`);
+    remove.addEventListener("click", () => removeSource(src.id, remove));
+    heading.append(text("strong", src.name), remove); item.append(heading, text("small", `${src.frames.toLocaleString()} frames · ${(src.size / 1048576).toFixed(1)} MB`)); $("sources").append(item);
+  }
+  $("schema").replaceChildren();
+  for (const name of ["frames", "tracks", "files", "boxes"]) {
+    if (!info.schemas[name]) continue;
+    const details = document.createElement("details"); details.open = name === "frames"; details.append(text("summary", name));
+    const columns = text("div", "", "columns"); for (const c of info.schemas[name]) columns.append(text("div", c === "frame" ? "frame · binary" : c, c === "frame" ? "binary-column" : ""));
+    details.append(columns); $("schema").append(details);
+  }
+  return info;
+}
+async function removeSource(id, button) {
+  generation++; previewVersion++; stop(); button.disabled = true;
+  try {
+    await api("/api/source/" + id, null, "DELETE"); const info = await refreshInfo();
+    if (info.sources.length) await runQuery();
+    else {
+      result = { columns: [], rows: [] }; selection.clear(); renderTable(); updateQueue();
+      $("preview").hidden = true; $("preview-empty").hidden = false; $("frame-badge").hidden = true; $("download").hidden = true;
+      $("frame-title").textContent = "No frame selected"; $("frame-detail").textContent = "Binary frame + decoded preview"; $("result-note").textContent = "Open a video to query.";
+      $("run").disabled = false; message("Source removed from the session. Open a video to continue.");
+    }
+  } catch (error) { button.disabled = false; message(error.message, "error"); }
+}
+function stop() { playing = false; playbackVersion++; $("play").textContent = "▶ Play selection"; }
+function updateQueue() {
+  stop(); const unique = new Map();
+  result.rows.forEach((row, index) => { if (selection.has(index)) for (const f of frameValues(row)) unique.set(f.id, f); });
+  queue = [...unique.values()];
+  if ($("order").value === "presentation") {
+    const groups = new Map(); for (const f of queue) { const key = f.id.split("-")[0] + ":" + f.track_id; if (!groups.has(key)) groups.set(key, groups.size); }
+    const group = f => groups.get(f.id.split("-")[0] + ":" + f.track_id);
+    queue.sort((a, b) => group(a) - group(b) || a.pts_seconds - b.pts_seconds || a.sample_index - b.sample_index);
+  }
+  position = Math.min(position, Math.max(0, queue.length - 1));
+  $("selection-count").textContent = queue.length + " selected";
+  $("play").disabled = !queue.length || !decoderAvailable;
+  $("previous").disabled = $("next").disabled = $("scrub").disabled = !queue.length;
+  $("scrub").max = Math.max(0, queue.length - 1); updatePosition();
+}
+function updatePosition() { $("scrub").value = position; $("position").textContent = queue.length ? `${position + 1} / ${queue.length}` : "0 / 0"; }
+function renderTable() {
+  const head = $("results").querySelector("thead"), body = $("results").querySelector("tbody"); head.replaceChildren(); body.replaceChildren();
+  $("empty").hidden = result.rows.length > 0; $("row-count").textContent = result.rows.length;
+  if (!result.rows.length) { $("empty").querySelector("h3").textContent = "No matching rows"; $("empty").querySelector("p").textContent = "Try a wider selection or another table."; }
+  const hasFrames = result.rows.some(row => frameValues(row).length);
+  const hr = document.createElement("tr");
+  if (hasFrames) {
+    const th = document.createElement("th"), all = document.createElement("input"); all.type = "checkbox"; all.checked = true; all.setAttribute("aria-label", "Select all frame rows");
+    all.addEventListener("change", () => {
+      selection.clear(); if (all.checked) result.rows.forEach((row, i) => { if (frameValues(row).length) selection.add(i); });
+      body.querySelectorAll("input[type=checkbox]").forEach(c => { c.checked = selection.has(Number(c.dataset.row)); }); updateQueue();
+    }); th.append(all); hr.append(th);
+  }
+  for (const c of result.columns) hr.append(text("th", c)); head.append(hr);
+  result.rows.forEach((row, index) => {
+    const tr = document.createElement("tr"); tr.dataset.row = index;
+    if (hasFrames) {
+      const td = document.createElement("td"); if (frameValues(row).length) {
+        const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = selection.has(index); checkbox.dataset.row = index; checkbox.setAttribute("aria-label", `Select frame row ${index + 1}`);
+        checkbox.addEventListener("change", () => { if (checkbox.checked) selection.add(index); else selection.delete(index); allState(); updateQueue(); }); td.append(checkbox);
+      } tr.append(td);
+    }
+    for (const c of result.columns) {
+      const td = document.createElement("td"), value = row[c];
+      if (value && value.type === "frame") {
+        const button = text("button", `▣ Frame ${value.sample_index}`, "frame-cell"); button.title = `${value.size} encoded bytes · preview frame`; button.dataset.frame = value.id;
+        button.addEventListener("click", () => { stop(); const p = queue.findIndex(f => f.id === value.id); if (p >= 0) { position = p; updatePosition(); } show(value).catch(e => message(e.message, "error")); }); td.append(button);
+      } else if (value == null) td.append(text("span", "null", "null"));
+      else td.textContent = typeof value === "number" && !Number.isInteger(value) ? Number(value.toFixed(6)).toString() : String(value);
+      tr.append(td);
+    } body.append(tr);
+  });
+  function allState() { const all = head.querySelector("input"); if (!all) return; const count = result.rows.filter(r => frameValues(r).length).length; all.checked = selection.size === count; all.indeterminate = selection.size > 0 && selection.size < count; }
+}
+async function prepare(frames) {
+  const ids = frames.filter(f => !ready.has(f.id)).map(f => f.id); if (!ids.length) return;
+  await api("/api/render", { ids }); ids.forEach(id => ready.add(id));
+}
+function loadImage(frame) {
+  if (images.has(frame.id)) return images.get(frame.id);
+  const promise = new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error("Could not load frame preview")); img.src = frame.preview_url; });
+  images.set(frame.id, promise); if (images.size > 8) images.delete(images.keys().next().value);
+  promise.catch(() => images.delete(frame.id)); return promise;
+}
+async function show(frame) {
+  const version = ++previewVersion;
+  $("download").href = frame.raw_url; $("download").hidden = false;
+  $("frame-title").textContent = `${frame.source} · Frame ${frame.sample_index}`;
+  $("frame-detail").textContent = `Track ${frame.track_id} · PTS ${frame.pts_seconds.toFixed(6)} s · ${frame.size.toLocaleString()} bytes`;
+  $("results").querySelectorAll("tbody tr").forEach(tr => tr.classList.toggle("active", frameValues(result.rows[Number(tr.dataset.row)]).some(f => f.id === frame.id)));
+  if (!decoderAvailable) return;
+  if (!ready.has(frame.id)) { message(`Rendering frame ${frame.sample_index}…`, "busy"); await prepare([frame]); }
+  const img = await loadImage(frame); if (version !== previewVersion) return;
+  $("preview").src = img.src; $("preview").hidden = false; $("preview-empty").hidden = true;
+  $("frame-badge").textContent = `PTS ${frame.pts_seconds.toFixed(3)} s`; $("frame-badge").hidden = false;
+  if (!playing) message("Frame ready. Select rows to create a playback sequence.");
+}
+async function runQuery() {
+  const version = ++generation; previewVersion++; stop(); $("run").disabled = true; message("Running query…", "busy");
+  $("preview").hidden = true; $("preview-empty").hidden = false; $("frame-badge").hidden = true; $("download").hidden = true;
+  $("frame-title").textContent = "No frame selected"; $("frame-detail").textContent = "Binary frame + decoded preview";
+  try {
+    const data = await api("/api/query", { sql: $("sql").value }); if (version !== generation) return;
+    result = data; selection.clear(); result.rows.forEach((r, i) => { if (frameValues(r).length) selection.add(i); }); position = 0;
+    renderTable(); updateQueue();
+    $("result-note").textContent = data.truncated ? "Showing 500 rows. Add LIMIT or narrow WHERE." : queue.length ? "Select rows for playback · click a frame to inspect" : "Scalar query results";
+    message(`${result.rows.length} rows returned${data.truncated ? " · result capped at 500 rows" : ""}.`);
+    if (queue.length) await show(queue[0]);
+  } catch (error) { if (version === generation) message(error.message, "error"); }
+  finally { if (version === generation) $("run").disabled = false; }
+}
+async function play() {
+  if (playing) { stop(); return; } if (!queue.length) return;
+  const version = ++playbackVersion; playing = true; $("play").textContent = "Ⅱ Pause";
+  try {
+    message(`Preparing ${queue.length} selected frames…`, "busy"); await prepare(queue); if (version !== playbackVersion) return;
+    if (position === queue.length - 1) position = 0;
+    message(`Playing ${queue.length} selected frames.`, "busy"); let due = performance.now();
+    const tick = async () => {
+      if (version !== playbackVersion) return;
+      await show(queue[position]); if (version !== playbackVersion) return;
+      updatePosition(); for (let n = 1; n <= 2 && position + n < queue.length; n++) loadImage(queue[position + n]).catch(() => {});
+      const duration = Math.max(0.01, queue[position].duration_seconds) / Number($("speed").value);
+      due = Math.max(due, performance.now()) + duration * 1000;
+      setTimeout(() => {
+        if (version !== playbackVersion) return;
+        if (position + 1 >= queue.length) { stop(); message("Selection finished."); return; }
+        position++; tick().catch(error => { stop(); message(error.message, "error"); });
+      }, Math.max(0, due - performance.now()));
+    }; await tick();
+  } catch (error) { if (version === playbackVersion) { stop(); message(error.message, "error"); } }
+}
+function move(next) { stop(); if (!queue.length) return; position = Math.max(0, Math.min(queue.length - 1, next)); updatePosition(); show(queue[position]).catch(e => message(e.message, "error")); }
+$("run").addEventListener("click", runQuery);
+$("sql").addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); runQuery(); } });
+document.querySelectorAll("[data-example]").forEach(button => button.addEventListener("click", () => { $("sql").value = examples[button.dataset.example]; $("sql").focus(); }));
+$("play").addEventListener("click", play); $("previous").addEventListener("click", () => move(position - 1)); $("next").addEventListener("click", () => move(position + 1)); $("scrub").addEventListener("input", () => move(Number($("scrub").value)));
+$("order").addEventListener("change", () => { updateQueue(); if (queue.length) move(0); });
+$("upload").addEventListener("change", async () => {
+  stop(); const files = [...$("upload").files]; $("upload").disabled = true; $("run").disabled = true;
+  try {
+    for (const file of files) {
+      message(`Loading ${file.name}…`, "busy"); const body = new FormData(); body.append("file", file);
+      const response = await fetch("/api/upload", { method: "POST", body }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Upload failed");
+    }
+    await refreshInfo(); await runQuery();
+  } catch (error) { await refreshInfo().catch(() => {}); message(error.message, "error"); }
+  finally { $("upload").value = ""; $("upload").disabled = false; $("run").disabled = false; }
+});
+refreshInfo().then(info => { if (info.sources.length) runQuery(); }).catch(e => message(e.message, "error"));

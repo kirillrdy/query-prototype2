@@ -42,6 +42,7 @@ type parser struct {
 	tracks       []format.Row
 	file         format.Row
 	sampleTracks []sampleTrack
+	mediaRanges  []byteRange
 }
 
 func (Adapter) Read(ctx context.Context, s format.Source) (map[string]format.Table, error) {
@@ -70,7 +71,7 @@ func (Adapter) Read(ctx context.Context, s format.Source) (map[string]format.Tab
 		"files":  {Columns: []string{"path", "format", "size", "major_brand", "duration_seconds", "track_count"}, Rows: []format.Row{p.file}},
 		"tracks": {Columns: []string{"path", "track_id", "handler", "codec", "width", "height", "timescale", "duration_seconds"}, Rows: p.tracks},
 		"boxes":  {Columns: []string{"path", "box_path", "type", "offset", "size", "depth"}, Rows: p.boxes},
-		"frames": {Columns: []string{"path", "track_id", "sample_index", "dts_seconds", "pts_seconds", "duration_seconds", "size", "is_keyframe"}, Rows: frames},
+		"frames": {Columns: []string{"path", "track_id", "sample_index", "dts_seconds", "pts_seconds", "duration_seconds", "size", "is_keyframe", "offset", "frame"}, Rows: frames},
 	}, nil
 }
 
@@ -129,6 +130,9 @@ func (p *parser) walk(start, end int64, parent string, depth int, track format.R
 			return fmt.Errorf("invalid %q box size %d at %d (remaining %d)", kind, size, off, end-off)
 		}
 		b := box{kind: kind, path: parent + "/" + kind, offset: off, size: size, header: header, depth: depth}
+		if kind == "mdat" {
+			p.mediaRanges = append(p.mediaRanges, byteRange{off + header, off + size})
+		}
 		p.boxes = append(p.boxes, format.Row{"path": p.s.Name, "box_path": b.path, "type": kind, "offset": off, "size": size, "depth": depth})
 		if err := p.metadata(b, track, samples); err != nil {
 			return fmt.Errorf("%s at %d: %w", b.path, off, err)
@@ -154,7 +158,7 @@ func (p *parser) walk(start, end int64, parent string, depth int, track format.R
 
 func (p *parser) metadata(b box, track format.Row, samples *sampleTable) error {
 	switch b.kind {
-	case "stts", "ctts", "stsz", "stss":
+	case "stts", "ctts", "stsz", "stss", "stsc", "stco", "co64":
 		if samples != nil {
 			return p.sampleMetadata(b, samples)
 		}

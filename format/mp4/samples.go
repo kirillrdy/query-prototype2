@@ -19,7 +19,10 @@ type sampleTable struct {
 	sizes               []uint32
 	sync                map[uint32]bool
 	seen                map[string]bool
+	chunks              []uint64
+	chunkRuns           []chunkRun
 }
+type chunkRun struct{ first, samples, description uint32 }
 type sampleTrack struct {
 	row     format.Row
 	samples *sampleTable
@@ -61,6 +64,10 @@ func (p *parser) sampleMetadata(b box, s *sampleTable) error {
 		entrySize = 4
 	} else if b.kind == "stss" {
 		entrySize = 4
+	} else if b.kind == "stco" {
+		entrySize = 4
+	} else if b.kind == "stsc" {
+		entrySize = 12
 	}
 	if count > maxSamples {
 		return fmt.Errorf("%s count exceeds %d", b.kind, maxSamples)
@@ -101,6 +108,16 @@ func (p *parser) sampleMetadata(b box, s *sampleTable) error {
 				return fmt.Errorf("invalid sync sample index %d", index)
 			}
 			s.sync[index] = true
+		case "stco":
+			s.chunks = append(s.chunks, uint64(binary.BigEndian.Uint32(d[off:off+4])))
+		case "co64":
+			s.chunks = append(s.chunks, binary.BigEndian.Uint64(d[off:off+8]))
+		case "stsc":
+			r := chunkRun{binary.BigEndian.Uint32(d[off : off+4]), binary.BigEndian.Uint32(d[off+4 : off+8]), binary.BigEndian.Uint32(d[off+8 : off+12])}
+			if r.first == 0 || r.samples == 0 || r.description == 0 || (len(s.chunkRuns) == 0 && r.first != 1) || (len(s.chunkRuns) > 0 && r.first <= s.chunkRuns[len(s.chunkRuns)-1].first) {
+				return fmt.Errorf("invalid sample-to-chunk entry")
+			}
+			s.chunkRuns = append(s.chunkRuns, r)
 		case "stts", "ctts":
 			n := binary.BigEndian.Uint32(d[off : off+4])
 			value := int64(binary.BigEndian.Uint32(d[off+4 : off+8]))
@@ -152,6 +169,10 @@ func (p *parser) frames() ([]format.Row, error) {
 			return nil, fmt.Errorf("video track requires both stsz and stts")
 		}
 		count := len(s.sizes)
+		locations, err := p.sampleLocations(s)
+		if err != nil {
+			return nil, err
+		}
 		if len(rows)+count > maxSamples {
 			return nil, fmt.Errorf("frame count exceeds %d per file", maxSamples)
 		}
@@ -184,7 +205,16 @@ func (p *parser) frames() ([]format.Row, error) {
 				return nil, err
 			}
 			keyframe := s.sync == nil || s.sync[uint32(i+1)]
-			rows = append(rows, format.Row{"path": p.s.Name, "track_id": t.row["track_id"], "sample_index": i + 1, "dts_seconds": float64(dts) / float64(scale), "pts_seconds": float64(dts+offsets[i]) / float64(scale), "duration_seconds": float64(durations[i]) / float64(scale), "size": size, "is_keyframe": keyframe})
+			pts, duration := float64(dts+offsets[i])/float64(scale), float64(durations[i])/float64(scale)
+			row := format.Row{"path": p.s.Name, "track_id": t.row["track_id"], "sample_index": i + 1, "dts_seconds": float64(dts) / float64(scale), "pts_seconds": pts, "duration_seconds": duration, "size": size, "is_keyframe": keyframe, "offset": nil, "frame": nil}
+			if locations != nil {
+				row["offset"] = locations[i]
+				id, ok := t.row["track_id"].(uint32)
+				if ok {
+					row["frame"] = format.Frame{Type: "frame", Source: p.s.Name, TrackID: id, SampleIndex: i + 1, Offset: locations[i], Size: size, PTS: pts, Duration: duration}
+				}
+			}
+			rows = append(rows, row)
 			dts += durations[i]
 		}
 	}
