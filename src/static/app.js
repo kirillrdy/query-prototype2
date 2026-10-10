@@ -50,7 +50,7 @@ async function removeSource(id, button) {
     }
   } catch (error) { button.disabled = false; message(error.message, "error"); }
 }
-function stop() { playing = false; playbackVersion++; $("play").textContent = "▶ Play selection"; }
+function stop() { playing = false; playbackVersion++; $("play").textContent = "▶ Play"; }
 function updateQueue(stopPlayback = true) {
   if (stopPlayback) stop(); const unique = new Map();
   queueRows.clear();
@@ -129,9 +129,13 @@ function renderGraph() {
 }
 function setResultView(view) {
   resultView = view;
-  $("table-view").hidden = view !== "table"; $("graph-view").hidden = view !== "graph";
-  $("view-table").setAttribute("aria-pressed", String(view === "table"));
-  $("view-graph").setAttribute("aria-pressed", String(view === "graph"));
+  if (view !== "player") stop();
+  for (const name of ["table", "graph", "player"]) {
+    const active = view === name;
+    $(name + "-view").hidden = !active;
+    $("view-" + name).setAttribute("aria-selected", String(active));
+    $("view-" + name).tabIndex = active ? 0 : -1;
+  }
   renderGraph();
 }
 async function prepare(frames) {
@@ -177,6 +181,7 @@ function showMasks(image, row) {
 }
 async function show(frame, quiet = false, row = queueRows.get(frame.id) || frameRows.get(frame.id)) {
   const version = ++previewVersion;
+  if (!quiet) setResultView("player");
   clearMasks();
   $("download").href = frame.raw_url; $("download").hidden = false;
   $("frame-title").textContent = `${frame.source} · Frame ${frame.sample_index}`;
@@ -273,11 +278,23 @@ async function play() {
   } catch (error) { if (version === playbackVersion) { stop(); message(error.message, "error"); } }
 }
 function move(next) { stop(); if (!queue.length) return; position = Math.max(0, Math.min(queue.length - 1, next)); updatePosition(); show(queue[position]).catch(e => message(e.message, "error")); }
-$("view-table").addEventListener("click", () => setResultView("table"));
+const resultTabs = ["table", "graph", "player"];
+for (const [index, view] of resultTabs.entries()) {
+  const tab = $("view-" + view);
+  tab.addEventListener("click", () => setResultView(view));
+  tab.addEventListener("keydown", event => {
+    let next;
+    if (event.key === "ArrowRight") next = (index + 1) % resultTabs.length;
+    else if (event.key === "ArrowLeft") next = (index + resultTabs.length - 1) % resultTabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = resultTabs.length - 1;
+    else return;
+    event.preventDefault(); setResultView(resultTabs[next]); $("view-" + resultTabs[next]).focus();
+  });
+}
 $("show-masks").addEventListener("change", maskVisibility);
 $("mask-opacity").addEventListener("input", maskVisibility);
 $("mask-column").addEventListener("change", () => { try { drawMasks(); } catch (error) { message(error.message, "error"); } });
-$("view-graph").addEventListener("click", () => setResultView("graph"));
 for (const id of ["graph-x", "graph-y"]) $(id).addEventListener("change", () => { graphAxesChosen = true; renderGraph(); });
 $("run").addEventListener("click", runQuery);
 $("cancel-query").addEventListener("click", () => { if (queryController) queryController.abort(); });

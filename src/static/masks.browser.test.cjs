@@ -21,6 +21,16 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         await until(() => decoderAvailable);
         await runQuery();
         await until(() => !$('mask-controls').hidden);
+        check(!$('table-view').hidden && $('player-view').hidden, 'Results stay in Table until Player is selected');
+        check($('player-view').parentElement.classList.contains('result-panel'), 'Player lives beside the other result panels');
+        $('view-player').click();
+        check(!$('player-view').hidden && $('table-view').hidden && $('graph-view').hidden, 'Player tab visibility');
+        check($('view-player').getAttribute('aria-selected') === 'true', 'Player selected tab state');
+        check(!$('player-details').open && $('frame-title').closest('details') === $('player-details'), 'Extra frame details start collapsed');
+        check($('scrub').closest('.transport') && $('play').textContent === '▶ Play', 'Compact playback bar');
+        $('player-details').open = true;
+        check($('speed').getBoundingClientRect().width > 0 && $('download').getBoundingClientRect().width > 0, 'Extra controls remain available');
+        $('player-details').open = false;
         const canvas = $('mask-overlay'), context = canvas.getContext('2d');
         const pixel = (x, y) => Array.from(context.getImageData(x, y, 1, 1).data);
         check(canvas.width === 120 && canvas.height === 60, 'Preview scale');
@@ -29,7 +39,7 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         check(pixel(60, 5)[3] === 0, 'Background transparency');
         check(getComputedStyle(canvas).opacity === '0.5', 'Default opacity');
         const box = canvas.getBoundingClientRect(), imageBox = $('preview').getBoundingClientRect();
-        check(box.width === imageBox.width && box.height === imageBox.height, 'Overlay and image bounds');
+        check(box.width > 0 && box.width === imageBox.width && box.height === imageBox.height, 'Overlay and image bounds');
         check(getComputedStyle(canvas).objectFit === getComputedStyle($('preview')).objectFit, 'Letterbox alignment');
         $('show-masks').checked = false; $('show-masks').dispatchEvent(new Event('change'));
         check(canvas.hidden, 'Toggle hides masks');
@@ -45,6 +55,20 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         document.querySelector('.frame-cell').click();
         await until(() => $('mask-count').textContent === '2 masks' && !canvas.hidden);
         check(pixel(60, 5)[3] === 0, 'Click restores the correct row masks');
+        $('view-graph').click();
+        check(!$('graph-view').hidden && $('player-view').hidden, 'Graph tab visibility');
+        $('view-table').click();
+        check(!$('table-view').hidden && $('player-view').hidden && queue.length === 2, 'Table preserves selected frames');
+        document.querySelector('.frame-cell').click();
+        await until(() => $('mask-count').textContent === '2 masks' && !canvas.hidden);
+        check(!$('player-view').hidden, 'Frame click opens Player');
+        $('view-player').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+        check(!$('graph-view').hidden && document.activeElement === $('view-graph'), 'Keyboard switches result tabs');
+        $('view-graph').dispatchEvent(new KeyboardEvent('keydown', { key: 'End' }));
+        check(!$('player-view').hidden && document.activeElement === $('view-player'), 'Keyboard selects Player');
+        $('play').click(); await until(() => playing);
+        $('view-table').click();
+        check(!playing && $('player-view').hidden, 'Leaving Player pauses playback');
         await fetch('/__report', { method: 'POST', body: JSON.stringify({ ok: true }) });
       } catch (error) { await fetch('/__report', { method: 'POST', body: JSON.stringify({ error: error.message }) }); }
     })();`;

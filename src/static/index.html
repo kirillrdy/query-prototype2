@@ -18,29 +18,28 @@ LIMIT 48</textarea>
  <div class="query-footer"><div class="examples"><button data-example="mixed">Frames + fields</button><button data-example="motion">Motion</button><button data-example="people">People</button><button data-example="sam3">SAM3 masks</button><button data-example="keyframes">Keyframes</button><button data-example="tracks">Tracks</button></div><div class="query-actions"><button id="cancel-query" hidden>Cancel</button><button id="run" class="primary">Run query</button></div></div>
  </section>
  <div id="message" role="status" aria-live="polite" class="message">Open a video to start exploring.</div>
- <section class="result-panel"><div class="result-head"><h2>Results <span id="row-count" class="count">0</span></h2><div class="result-tools"><span id="result-note" class="muted">Text fields appear here. Frame values open in the viewer.</span><div class="view-toggle" role="group" aria-label="Result view"><button id="view-table" aria-pressed="true">Table</button><button id="view-graph" aria-pressed="false">Graph</button></div></div></div>
- <div id="table-view" class="table-scroll"><table id="results"><thead></thead><tbody></tbody></table><div id="empty" class="empty"><span class="empty-icon">▤</span><h3>Make your first selection</h3><p>Choose frames, timestamps, or metadata with a query.</p></div></div>
- <div id="graph-view" class="graph-view" hidden>
+ <section class="result-panel"><div class="result-head"><h2>Results <span id="row-count" class="count">0</span></h2><div class="result-tools"><span id="result-note" class="muted">Text fields appear here. Frame values open in the player.</span><div class="view-toggle" role="tablist" aria-label="Result view"><button id="view-table" role="tab" aria-selected="true" aria-controls="table-view">Table</button><button id="view-graph" role="tab" aria-selected="false" aria-controls="graph-view" tabindex="-1">Graph</button><button id="view-player" role="tab" aria-selected="false" aria-controls="player-view" tabindex="-1">Player</button></div></div></div>
+ <div id="table-view" class="table-scroll" role="tabpanel" aria-labelledby="view-table"><table id="results"><thead></thead><tbody></tbody></table><div id="empty" class="empty"><span class="empty-icon">▤</span><h3>Make your first selection</h3><p>Choose frames, timestamps, or metadata with a query.</p></div></div>
+ <div id="graph-view" class="graph-view" role="tabpanel" aria-labelledby="view-graph" hidden>
   <div class="graph-controls"><label>X <select id="graph-x" aria-label="Graph X axis"></select></label><label>Y <select id="graph-y" aria-label="Graph Y axis"></select></label><span id="graph-note" class="muted"></span></div>
   <div id="graph-plot" class="graph-plot"></div>
  </div>
- </section>
-</section>
-<section class="viewer" aria-label="Frame viewer">
- <div class="viewer-head"><span>Frame viewer</span><span id="selection-count" class="count">0 selected</span></div>
+<section id="player-view" class="viewer" role="tabpanel" aria-labelledby="view-player" hidden>
  <div class="screen"><img id="preview" alt="Selected video frame" hidden><canvas id="mask-overlay" aria-hidden="true" hidden></canvas><div id="preview-empty"><p>Select a frame to preview it.</p></div><span id="frame-badge" hidden></span></div>
  <div id="mask-controls" class="mask-controls" hidden>
   <label><input id="show-masks" type="checkbox" checked> Show masks</label><span id="mask-count" class="muted"></span>
   <label id="mask-column-label" hidden>Segmentation <select id="mask-column"></select></label>
   <label class="mask-opacity">Opacity <input id="mask-opacity" type="range" min="0" max="1" step="0.05" value="0.5"></label>
  </div>
- <div class="viewer-meta"><strong id="frame-title">No frame selected</strong><span id="frame-detail" class="muted">Binary frame + decoded preview</span></div>
- <div class="transport"><button id="previous" aria-label="Previous selected frame" disabled>‹</button><button id="play" class="primary" disabled>▶ Play selection</button><button id="next" aria-label="Next selected frame" disabled>›</button></div>
- <label class="sr-only" for="scrub">Selected frame position</label><input id="scrub" type="range" min="0" max="0" value="0" disabled><div class="playback-info"><span id="position">0 / 0</span><label>Speed <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label></div>
- <label class="order-label">Playback order<select id="order"><option value="presentation">Presentation time</option><option value="result">Query result order</option></select></label>
- <p class="muted compact">Selected frames only · No audio</p>
- <a id="download" class="download" hidden>↓ Download binary frame</a>
+ <div class="transport"><button id="previous" aria-label="Previous selected frame" disabled>‹</button><button id="play" class="primary" disabled>▶ Play</button><button id="next" aria-label="Next selected frame" disabled>›</button><label class="sr-only" for="scrub">Selected frame position</label><input id="scrub" type="range" min="0" max="0" value="0" disabled><span id="position">0 / 0</span></div>
+ <details id="player-details" class="player-details"><summary>Details</summary>
+  <div class="viewer-meta"><strong id="frame-title">No frame selected</strong><span id="frame-detail" class="muted">Binary frame + decoded preview</span></div>
+  <div class="player-settings"><label>Speed <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Order <select id="order"><option value="presentation">Presentation time</option><option value="result">Query result order</option></select></label><span id="selection-count" class="count">0 selected</span><span class="muted">No audio</span></div>
+  <a id="download" class="download" hidden>↓ Download binary frame</a>
+ </details>
  <div id="decoder-note" class="decoder-note" hidden>Previews need FFmpeg and FFprobe installed on this machine. Binary downloads and text queries are available.</div>
+</section>
+</section>
 </section>
 </main>
 </body></html>

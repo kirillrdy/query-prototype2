@@ -17,7 +17,7 @@ button:hover, .upload:hover, .path-picker > summary:hover { background: #303b42;
 button:disabled { opacity: .4; cursor: default; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 [hidden] { display: none !important; }
-main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; min-height: 100dvh; }
+main { min-height: 100dvh; }
 .workspace { display: flex; flex-direction: column; gap: 14px; min-width: 0; height: 100dvh; overflow: auto; padding: 20px; }
 .file-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
 .upload, .path-picker > summary { display: block; font-size: 12px; white-space: nowrap; }
@@ -69,42 +69,40 @@ input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
 .empty-icon { font-size: 26px; color: #61727c; }
 h3 { font-size: 14px; font-weight: 500; color: var(--text); margin: 12px 0 5px; }
 .empty p { font-size: 12px; margin: 0; }
-.viewer { border-left: 1px solid var(--edge); padding: 20px; background: #151c20; height: 100dvh; overflow: auto; }
-.viewer-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 12px; color: var(--muted); }
-.screen { aspect-ratio: 16/9; position: relative; background: #0b1013; border: 1px solid var(--edge); border-radius: 8px; display: grid; place-items: center; overflow: hidden; }
+.viewer { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; padding: 20px; background: #151c20; overflow: auto; }
+.viewer > * { width: 100%; max-width: 960px; flex-shrink: 0; margin-inline: auto; }
+.screen { flex: 1 1 auto; min-height: 160px; aspect-ratio: 16/9; max-height: 50dvh; position: relative; background: #0b1013; border: 1px solid var(--edge); border-radius: 8px; display: grid; place-items: center; overflow: hidden; }
 .screen img { width: 100%; height: 100%; object-fit: contain; }
 #mask-overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
-.mask-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; font-size: 11px; }
+.mask-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 11px; }
 .mask-controls label { display: flex; align-items: center; gap: 6px; }
-.mask-controls .mask-opacity { width: 100%; }
+.mask-controls .mask-opacity { flex: 0 1 200px; margin-left: auto; }
 .mask-controls input[type=range] { flex: 1; width: auto; margin: 0; }
 #preview-empty { text-align: center; padding: 16px; font-size: 12px; color: var(--muted); }
 #frame-badge { position: absolute; bottom: 10px; left: 10px; background: #000b; border-radius: 3px; padding: 2px 7px; font: 10px monospace; color: #dde8ec; }
-.viewer-meta { margin: 16px 0 20px; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.viewer-meta { margin: 10px 0 12px; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
 .viewer-meta strong { font-size: 12px; font-weight: 500; }
 .viewer-meta span { font: 10px/1.6 monospace; }
-.transport { display: flex; gap: 8px; }
-.transport #play { flex: 1; }
+.transport { display: flex; align-items: center; gap: 8px; }
+.transport #play { min-width: 76px; }
 .transport #previous, .transport #next { font-size: 22px; line-height: 1; padding: 5px 11px; }
-input[type=range] { width: 100%; margin: 18px 0 5px; accent-color: var(--accent); }
-.playback-info { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
-.playback-info label { display: flex; align-items: center; gap: 7px; }
+input[type=range] { accent-color: var(--accent); }
+.transport #scrub { flex: 1; min-width: 40px; margin: 0 4px; }
+.transport #position { flex-shrink: 0; color: var(--muted); font: 11px monospace; }
+.player-details summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+.player-settings { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 11px; }
+.player-settings label { display: flex; align-items: center; gap: 6px; }
 select { color: var(--text); background: #222b30; border: 1px solid var(--edge); border-radius: 4px; font-size: 11px; padding: 3px; }
-.order-label { display: flex; align-items: center; justify-content: space-between; margin: 18px 0 12px; color: var(--muted); font-size: 11px; }
-.compact { font-size: 11px; margin: 0; line-height: 1.7; }
-.download { display: block; text-align: center; margin-top: 18px; padding: 10px; border: 1px solid #4b594f; border-radius: 5px; color: var(--teal); text-decoration: none; font-size: 12px; }
-.decoder-note { margin-top: 20px; background: #392d20; color: #e3bd87; padding: 12px; border-radius: 6px; font-size: 11px; }
+.download { display: inline-block; margin-top: 12px; color: var(--teal); text-decoration: none; font-size: 12px; }
+.decoder-note { background: #392d20; color: #e3bd87; padding: 12px; border-radius: 6px; font-size: 11px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 @media (min-width: 1600px) {
-  main { grid-template-columns: minmax(0, 1fr) 440px; }
   .workspace, .viewer { padding: 24px; }
 }
 @media (max-width: 900px) {
-  main { grid-template-columns: minmax(0, 1fr); }
   .workspace { height: auto; min-height: 70dvh; overflow: visible; }
   .result-panel { min-height: 280px; }
   .table-scroll { max-height: 60dvh; }
-  .viewer { height: auto; border-left: 0; border-top: 1px solid var(--edge); }
   .screen { max-width: 640px; margin-inline: auto; }
 }
 @media (max-width: 500px) {
@@ -122,7 +120,7 @@ select { color: var(--text); background: #222b30; border: 1px solid var(--edge);
 .result-tools { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .view-toggle { display: flex; flex-shrink: 0; padding: 2px; border: 1px solid var(--edge); border-radius: 6px; background: var(--bg); }
 .view-toggle button { border: 0; background: transparent; color: var(--muted); border-radius: 4px; padding: 4px 9px; font-size: 11px; }
-.view-toggle button[aria-pressed=true] { color: var(--text); background: #303b42; }
+.view-toggle button[aria-selected=true] { color: var(--text); background: #303b42; }
 .graph-view { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; }
 .graph-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 12px 16px 0; }
 .graph-controls label { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }

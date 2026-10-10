@@ -48,11 +48,16 @@ WHERE pts_seconds >= 0.5 AND pts_seconds < 2
 LIMIT 100
 ```
 
-Click a frame cell to preview it or download its exact encoded sample bytes.
-Select rows and press **Play selection** for an image sequence, without audio.
+Results have **Table**, **Graph**, and **Player** tabs. Click a frame cell or a
+graph point to open its preview in **Player** and download its exact encoded
+sample bytes. Select rows in **Table**, then use **Play** in **Player**
+for an image sequence, without audio. Switching tabs preserves the selection
+and pauses playback when leaving the player.
+Player keeps the frame, masks, and playback bar visible. Expand **Details** for
+frame metadata, speed, playback order, and the binary download.
 Playback can follow presentation order or result order, with scrubbing, speed
-controls, and single-frame stepping. The **Table / Graph** toggle plots numeric
-fields as results arrive; clicking a graph point can open its frame preview.
+controls, and single-frame stepping. **Graph** plots numeric fields as results
+arrive.
 SAM3 masks overlay the frame preview automatically when the same row contains
 one frame and a segmentation result. Use **Show masks** and **Opacity** to adjust
 the overlay. Different masks use different colors; with multiple segmentation
