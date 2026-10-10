@@ -21,17 +21,12 @@ async function refreshInfo() {
   const info = await api("/api/info"); decoderAvailable = info.decoder_available;
   $("decoder-note").hidden = decoderAvailable; $("sources").replaceChildren();
   for (const src of info.sources) {
-    const item = text("div", "", "source"), heading = text("div", "", "source-heading"), remove = text("button", "×", "remove-source");
+    const item = text("div", "", "source"), remove = text("button", "×", "remove-source");
+    const name = text("span", src.name, "source-name");
+    name.title = `${src.name} · ${src.frames == null ? "Ready to query" : src.frames.toLocaleString() + " frames"} · ${(src.size / 1048576).toFixed(1)} MB`;
     remove.title = `Remove ${src.name} from this session`; remove.setAttribute("aria-label", `Remove ${src.name}`);
     remove.addEventListener("click", () => removeSource(src.id, remove));
-    heading.append(text("strong", src.name), remove); item.append(heading, text("small", `${src.frames == null ? "Ready to query" : src.frames.toLocaleString() + " frames"} · ${(src.size / 1048576).toFixed(1)} MB`)); $("sources").append(item);
-  }
-  $("schema").replaceChildren();
-  for (const name of ["frames", "tracks", "files", "boxes"]) {
-    if (!info.schemas[name]) continue;
-    const details = document.createElement("details"); details.open = name === "frames"; details.append(text("summary", name));
-    const columns = text("div", "", "columns"); for (const c of info.schemas[name]) columns.append(text("div", c === "frame" ? "frame · binary" : c, c === "frame" ? "binary-column" : ""));
-    details.append(columns); $("schema").append(details);
+    item.append(name, remove); $("sources").append(item);
   }
   return info;
 }
@@ -225,7 +220,7 @@ $("local-source").addEventListener("submit", async e => {
   e.preventDefault(); const button = $("open-path"); button.disabled = true;
   try {
     await api("/api/source", { path: $("local-path").value }); await refreshInfo();
-    $("local-path").value = ""; message("Video registered in place. Run a query to read its metadata.");
+    $("local-path").value = ""; $("path-picker").open = false; message("Video registered in place. Run a query to read its metadata.");
   } catch (error) { message(error.message, "error"); }
   finally { button.disabled = false; }
 });
