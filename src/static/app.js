@@ -15,7 +15,7 @@ const frameRows = new Map(), queueRows = new Map();
 let currentMasks = null;
 let queryController = null;
 let resultView = "table", graphAxesChosen = false, graphColumns = "";
-const frameValues = row => Object.values(row).filter(v => v && typeof v === "object" && v.type === "frame" && v.id);
+const frameValues = row => Object.values(row || {}).filter(v => v && typeof v === "object" && v.type === "frame" && v.id);
 function message(text, kind = "") { $("message").textContent = text; $("message").className = "message " + kind; }
 function text(tag, value, className) { const el = document.createElement(tag); el.textContent = value; if (className) el.className = className; return el; }
 async function api(path, body, method) {
@@ -123,7 +123,11 @@ function renderGraph() {
   }
   if (!graphAxesChosen) { x.value = defaults.x; y.value = defaults.y; }
   x.disabled = y.disabled = !columns.length;
-  if (resultView !== "graph") return;
+  if (resultView !== "graph") {
+    // Hidden markers must not retain indices into an earlier query's rows.
+    $("graph-plot").replaceChildren(); $("graph-note").textContent = "";
+    return;
+  }
   const chart = ResultGraph.render($("graph-plot"), result, x.value, y.value, inspectGraphRow);
   $("graph-note").textContent = chart.plotted.length ? `${chart.plotted.length} points · hover for values${result.rows.some(row => frameValues(row).length) ? " · click to preview" : ""}` : "";
 }

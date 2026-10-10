@@ -39,7 +39,7 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         check(pixel(60, 5)[3] === 0, 'Background transparency');
         check(getComputedStyle(canvas).opacity === '0.5', 'Default opacity');
         const box = canvas.getBoundingClientRect(), imageBox = $('preview').getBoundingClientRect();
-        check(box.width > 0 && box.width === imageBox.width && box.height === imageBox.height, 'Overlay and image bounds');
+        check(box.width > 0 && box.width === imageBox.width && box.height === imageBox.height, 'Overlay and image bounds: ' + JSON.stringify({ overlay: box.toJSON(), image: imageBox.toJSON() }));
         check(getComputedStyle(canvas).objectFit === getComputedStyle($('preview')).objectFit, 'Letterbox alignment');
         $('show-masks').checked = false; $('show-masks').dispatchEvent(new Event('change'));
         check(canvas.hidden, 'Toggle hides masks');
@@ -69,6 +69,21 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         $('play').click(); await until(() => playing);
         $('view-table').click();
         check(!playing && $('player-view').hidden, 'Leaving Player pauses playback');
+        // A previous graph can contain more markers than the next query has
+        // rows. Preview highlighting must not read those stale row indices.
+        result.columns = ['frame', 'pts_seconds'];
+        result.rows.forEach((row, index) => { row.pts_seconds = index; });
+        setResultView('graph');
+        check($('graph-plot').querySelectorAll('.graph-point').length === 2, 'Previous query graph markers');
+        setResultView('player');
+        $('sql').value = "SELECT frame, sam3(frame, 'hat') AS segmentation FROM frames WHERE sample_index = 3000 LIMIT 1";
+        await runQuery();
+        await until(() => !$('mask-controls').hidden || $('message').classList.contains('error'));
+        check(!$('message').classList.contains('error'), 'Single-frame query preview: ' + $('message').textContent);
+        check(result.rows.length === 1 && $('mask-count').textContent === '1 mask', 'New query mask preview');
+        inspectGraphRow(1); // A queued click from an old chart is harmless.
+        setResultView('graph');
+        check(!$('graph-plot').querySelector('.graph-point'), 'Graph shows only the new query results');
         await fetch('/__report', { method: 'POST', body: JSON.stringify({ ok: true }) });
       } catch (error) { await fetch('/__report', { method: 'POST', body: JSON.stringify({ error: error.message }) }); }
     })();`;
@@ -81,8 +96,12 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
     if (req.url === '/api/info') return json({ decoder_available: true, sources: [] });
     if (req.url === '/api/render') return json({ ready: true });
     if (req.url === '/api/query/stream') {
-      res.setHeader('content-type', 'application/x-ndjson');
-      return res.end([{ type: 'schema', columns: ['frame', 'segmentation', 'alternative'] }, { type: 'rows', rows }, { type: 'done' }].map(JSON.stringify).join('\n') + '\n');
+      let data = ''; req.on('data', chunk => { data += chunk; });
+      req.on('end', () => {
+        const singleFrame = JSON.parse(data).sql.includes('sample_index = 3000');
+        res.setHeader('content-type', 'application/x-ndjson');
+        res.end([{ type: 'schema', columns: singleFrame ? ['frame', 'segmentation'] : ['frame', 'segmentation', 'alternative'] }, { type: 'rows', rows: singleFrame ? [{ frame: frame(3000), segmentation: seg([0, 4, 4]) }] : rows }, { type: 'done' }].map(JSON.stringify).join('\n') + '\n');
+      }); return;
     }
     if (req.url === '/frame.svg') { res.setHeader('content-type', 'image/svg+xml'); return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="blue"/></svg>'); }
     if (req.url === '/overlay-check.js') { res.setHeader('content-type', 'text/javascript'); return res.end(browserCheck); }
