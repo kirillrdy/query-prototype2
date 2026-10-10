@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Binary Query — Video workbench</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Binary Query — Video workbench</title><link rel="stylesheet" href="/style.css"><script defer src="/graph.js"></script><script defer src="/app.js"></script></head>
 <body>
 <main>
 <section class="workspace" aria-label="Query workbench">
@@ -18,8 +18,12 @@ LIMIT 48</textarea>
  <div class="query-footer"><div class="examples"><button data-example="mixed">Frames + fields</button><button data-example="motion">Motion</button><button data-example="keyframes">Keyframes</button><button data-example="tracks">Tracks</button></div><div class="query-actions"><button id="cancel-query" hidden>Cancel</button><button id="run" class="primary">Run query</button></div></div>
  </section>
  <div id="message" role="status" aria-live="polite" class="message">Open a video to start exploring.</div>
- <section class="result-panel"><div class="result-head"><h2>Results <span id="row-count" class="count">0</span></h2><span id="result-note" class="muted">Text fields appear here. Frame values open in the viewer.</span></div>
- <div class="table-scroll"><table id="results"><thead></thead><tbody></tbody></table><div id="empty" class="empty"><span class="empty-icon">▤</span><h3>Make your first selection</h3><p>Choose frames, timestamps, or metadata with a query.</p></div></div>
+ <section class="result-panel"><div class="result-head"><h2>Results <span id="row-count" class="count">0</span></h2><div class="result-tools"><span id="result-note" class="muted">Text fields appear here. Frame values open in the viewer.</span><div class="view-toggle" role="group" aria-label="Result view"><button id="view-table" aria-pressed="true">Table</button><button id="view-graph" aria-pressed="false">Graph</button></div></div></div>
+ <div id="table-view" class="table-scroll"><table id="results"><thead></thead><tbody></tbody></table><div id="empty" class="empty"><span class="empty-icon">▤</span><h3>Make your first selection</h3><p>Choose frames, timestamps, or metadata with a query.</p></div></div>
+ <div id="graph-view" class="graph-view" hidden>
+  <div class="graph-controls"><label>X <select id="graph-x" aria-label="Graph X axis"></select></label><label>Y <select id="graph-y" aria-label="Graph Y axis"></select></label><span id="graph-note" class="muted"></span></div>
+  <div id="graph-plot" class="graph-plot"></div>
+ </div>
  </section>
 </section>
 <section class="viewer" aria-label="Frame viewer">

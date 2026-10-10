@@ -37,6 +37,14 @@ step one frame at a time. Playback is an image sequence, with no audio.
 Pure scalar queries display only a table; `SELECT frame FROM frames ...` works
 without including any identifying scalar columns.
 
+Use the **Table / Graph** toggle beside Results to plot numeric fields. Graph
+view defaults to a timestamp on X and a motion score on Y when available; choose
+other numeric fields with the axis selectors, or use row number on X. It updates
+as rows arrive, skips null/non-numeric values, and breaks lines at missing values
+and source/track boundaries when those identities are present. Hover a point for
+its values, or click a point containing a frame to preview it. Switching views
+keeps the same results and playback selection.
+
 The **×** beside a source removes it from the session and from subsequent
 queries. It never deletes the original video. All loaded sources participate
 in queries; you can also use `WHERE path = 'video.mp4'` to select one source.

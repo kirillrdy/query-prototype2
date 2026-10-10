@@ -10,6 +10,7 @@ let result = { columns: [], rows: [] }, selection = new Set(), queue = [], posit
 let generation = 0, previewVersion = 0, playbackVersion = 0, playing = false, decoderAvailable = false;
 const ready = new Set(), images = new Map();
 let queryController = null;
+let resultView = "table", graphAxesChosen = false, graphColumns = "";
 const frameValues = row => Object.values(row).filter(v => v && typeof v === "object" && v.type === "frame" && v.id);
 function message(text, kind = "") { $("message").textContent = text; $("message").className = "message " + kind; }
 function text(tag, value, className) { const el = document.createElement(tag); el.textContent = value; if (className) el.className = className; return el; }
@@ -37,7 +38,7 @@ async function removeSource(id, button) {
     await api("/api/source/" + id, null, "DELETE"); const info = await refreshInfo();
     if (info.sources.length) await runQuery();
     else {
-      result = { columns: [], rows: [] }; selection.clear(); renderTable(); updateQueue();
+      result = { columns: [], rows: [] }; graphAxesChosen = false; selection.clear(); renderResults(); updateQueue();
       $("preview").hidden = true; $("preview-empty").hidden = false; $("frame-badge").hidden = true; $("download").hidden = true;
       $("frame-title").textContent = "No frame selected"; $("frame-detail").textContent = "Binary frame + decoded preview"; $("result-note").textContent = "Open a video to query.";
       $("run").disabled = false; message("Source removed from the session. Open a video to continue.");
@@ -95,6 +96,38 @@ function renderTable() {
   });
   function allState() { const all = head.querySelector("input"); if (!all) return; const count = result.rows.filter(r => frameValues(r).length).length; all.checked = selection.size === count; all.indeterminate = selection.size > 0 && selection.size < count; }
 }
+function renderResults() { renderTable(); renderGraph(); }
+function inspectGraphRow(index) {
+  const frame = frameValues(result.rows[index])[0]; if (!frame) return;
+  stop(); const next = queue.findIndex(value => value.id === frame.id);
+  if (next >= 0) { position = next; updatePosition(); }
+  show(frame).catch(error => message(error.message, "error"));
+}
+function renderGraph() {
+  const columns = ResultGraph.numericColumns(result), signature = JSON.stringify(columns);
+  const x = $("graph-x"), y = $("graph-y"), defaults = ResultGraph.defaults(columns);
+  if (signature !== graphColumns) {
+    const previousX = x.value, previousY = y.value;
+    graphColumns = signature; x.replaceChildren(); y.replaceChildren();
+    const option = (value, label) => { const node = text("option", label); node.value = value; return node; };
+    x.append(option("", "Row number"));
+    for (const column of columns) { x.append(option(column, column)); y.append(option(column, column)); }
+    if (graphAxesChosen && columns.includes(previousY) && (!previousX || columns.includes(previousX))) { x.value = previousX; y.value = previousY; }
+    else { graphAxesChosen = false; }
+  }
+  if (!graphAxesChosen) { x.value = defaults.x; y.value = defaults.y; }
+  x.disabled = y.disabled = !columns.length;
+  if (resultView !== "graph") return;
+  const chart = ResultGraph.render($("graph-plot"), result, x.value, y.value, inspectGraphRow);
+  $("graph-note").textContent = chart.plotted.length ? `${chart.plotted.length} points · hover for values${result.rows.some(row => frameValues(row).length) ? " · click to preview" : ""}` : "";
+}
+function setResultView(view) {
+  resultView = view;
+  $("table-view").hidden = view !== "table"; $("graph-view").hidden = view !== "graph";
+  $("view-table").setAttribute("aria-pressed", String(view === "table"));
+  $("view-graph").setAttribute("aria-pressed", String(view === "graph"));
+  renderGraph();
+}
 async function prepare(frames) {
   const ids = frames.filter(f => !ready.has(f.id)).map(f => f.id); if (!ids.length) return;
   await api("/api/render", { ids }); ids.forEach(id => ready.add(id));
@@ -111,6 +144,7 @@ async function show(frame, quiet = false) {
   $("frame-title").textContent = `${frame.source} · Frame ${frame.sample_index}`;
   $("frame-detail").textContent = `Track ${frame.track_id} · PTS ${frame.pts_seconds.toFixed(6)} s · ${frame.size.toLocaleString()} bytes`;
   $("results").querySelectorAll("tbody tr").forEach(tr => tr.classList.toggle("active", frameValues(result.rows[Number(tr.dataset.row)]).some(f => f.id === frame.id)));
+  $("graph-plot").querySelectorAll(".graph-point").forEach(point => point.classList.toggle("active", frameValues(result.rows[Number(point.dataset.row)]).some(f => f.id === frame.id)));
   if (!decoderAvailable) return;
   if (!ready.has(frame.id)) { if (!quiet) message(`Rendering frame ${frame.sample_index}…`, "busy"); await prepare([frame]); }
   const img = await loadImage(frame); if (version !== previewVersion) return;
@@ -144,7 +178,7 @@ async function runQuery() {
   const controller = new AbortController(); queryController = controller;
   const version = ++generation, started = performance.now(); let firstRow = null;
   previewVersion++; stop(); $("run").disabled = true; $("cancel-query").hidden = false; message("Running query…", "busy");
-  result = { columns: [], rows: [] }; selection.clear(); renderTable(); updateQueue();
+  result = { columns: [], rows: [] }; graphAxesChosen = false; selection.clear(); renderResults(); updateQueue();
   $("preview").hidden = true; $("preview-empty").hidden = false; $("frame-badge").hidden = true; $("download").hidden = true;
   $("frame-title").textContent = "No frame selected"; $("frame-detail").textContent = "Binary frame + decoded preview";
   const timing = () => firstRow == null ? "" : ` · first row in ${(firstRow / 1000).toFixed(2)} s`;
@@ -152,12 +186,12 @@ async function runQuery() {
     await readQueryStream($("sql").value, controller.signal, event => {
       if (version !== generation) return;
       if (event.type === "schema") {
-        result.columns = event.columns; renderTable(); $("result-note").textContent = "Preparing query input…";
+        result.columns = event.columns; renderResults(); $("result-note").textContent = "Preparing query input…";
       } else if (event.type === "rows") {
         const first = result.rows.length === 0;
         for (const row of event.rows) { const index = result.rows.length; result.rows.push(row); if (frameValues(row).length) selection.add(index); }
         if (firstRow == null && event.rows.length) firstRow = performance.now() - started;
-        renderTable(); updateQueue(false); $("result-note").textContent = "Receiving rows…";
+        renderResults(); updateQueue(false); $("result-note").textContent = "Receiving rows…";
         message(`${result.rows.length} rows received${timing()}…`, "busy");
         if (first && queue.length) show(queue[0], true).catch(error => { if (version === generation) message(`Preview: ${error.message}`, "error"); });
       } else if (event.type === "done") {
@@ -199,6 +233,9 @@ async function play() {
   } catch (error) { if (version === playbackVersion) { stop(); message(error.message, "error"); } }
 }
 function move(next) { stop(); if (!queue.length) return; position = Math.max(0, Math.min(queue.length - 1, next)); updatePosition(); show(queue[position]).catch(e => message(e.message, "error")); }
+$("view-table").addEventListener("click", () => setResultView("table"));
+$("view-graph").addEventListener("click", () => setResultView("graph"));
+for (const id of ["graph-x", "graph-y"]) $(id).addEventListener("change", () => { graphAxesChosen = true; renderGraph(); });
 $("run").addEventListener("click", runQuery);
 $("cancel-query").addEventListener("click", () => { if (queryController) queryController.abort(); });
 $("sql").addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); runQuery(); } });
