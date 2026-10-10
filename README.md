@@ -36,7 +36,7 @@ Any input error fails the command before results are emitted.
 
 ## Web workbench
 
-Open the printed `http://127.0.0.1:8080` URL; `-port 8090` chooses another port.
+Open the printed `http://127.0.0.1:3000` URL; `-port 8090` chooses another port.
 Use **Open video** to upload a file or **Open local path** to read it in place.
 Registration checks only the file and format header. Metadata is indexed when
 you run a query; frame counts appear after the first frame query.

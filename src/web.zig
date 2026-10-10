@@ -454,7 +454,7 @@ pub fn run(init: std.process.Init) !void {
     defer arena.deinit();
     const a = arena.allocator();
     const args = try init.minimal.args.toSlice(a);
-    var port: u16 = 8080;
+    var port: u16 = 3000;
     var i: usize = 1;
     if (i < args.len and (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--help"))) {
         std.debug.print("Usage: bquery-web [-port PORT] [FILE ...]\n", .{});
