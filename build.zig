@@ -35,13 +35,4 @@ pub fn build(b: *std.Build) void {
     // without recompilation. Always execute tests rather than caching results.
     test_run.has_side_effects = true;
     b.step("test", "Run native query tests").dependOn(&test_run.step);
-    const parity = b.addExecutable(.{ .name = "bquery-parity", .root_module = b.createModule(.{
-        .root_source_file = b.path("src/parity_main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{.{ .name = "query", .module = core }},
-    }) });
-    const install_parity = b.addInstallArtifact(parity, .{});
-    b.step("parity", "Build the test-only differential query runner").dependOn(&install_parity.step);
 }

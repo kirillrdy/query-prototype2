@@ -1,8 +1,0 @@
-.{
-    .name = .bquery_sam3,
-    .fingerprint = 0xea0e477e923d04fb,
-    .version = "0.0.0",
-    .minimum_zig_version = "0.17.0",
-    .dependencies = .{ .sam3 = .{ .path = "../../../../sam3" } },
-    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
-}

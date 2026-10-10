@@ -1,9 +1,6 @@
 /bquery
 /bquery-web
 /testdata/generated/
-/legacy/go/sam3-worker/.zig-cache/
-/legacy/go/sam3-worker/zig-out/
-/legacy/go/sam3-worker/zig-pkg/
 /.zig-cache/
 /zig-out/
 /zig-pkg/

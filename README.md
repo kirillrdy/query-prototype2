@@ -292,14 +292,4 @@ node src/static/masks.browser.test.cjs
 # Optional real-model checks (GPU required for SAM3):
 BQUERY_TEST_SAM3_VIDEO=/path/to/video.mp4 zig build test
 BQUERY_TEST_DETECTION_VIDEO=/path/to/video.mp4 zig build test
-
-# Differential regression tests against the archived Go implementation:
-zig build parity
-cd legacy/go
-go test ./...
 ```
-
-`legacy/go` preserves the prior implementation and its tests as a regression
-oracle, including its old worker code. It is independent of the production
-Zig build. Differential tests cover SQL semantics, valid/malformed MP4 metadata,
-web uploads and streams, exact B-frame previews/raw bytes, and motion scores.
