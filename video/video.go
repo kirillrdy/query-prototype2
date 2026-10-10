@@ -39,11 +39,14 @@ type Representation string
 
 const Preview Representation = "preview"
 const Gray Representation = "gray"
+const Detection Representation = "detection"
 
 func (r Representation) options() (suffix, filter string, args []string, err error) {
 	switch r {
 	case Preview:
 		return ".jpg", ",scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease", []string{"-q:v", "2"}, nil
+	case Detection:
+		return ".detect.jpg", ",scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease", []string{"-q:v", "2"}, nil
 	case Gray:
 		return ".gray", ",scale=160:90,format=gray", []string{"-c:v", "rawvideo", "-pix_fmt", "gray", "-f", "image2"}, nil
 	}

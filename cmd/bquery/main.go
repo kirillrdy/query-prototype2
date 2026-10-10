@@ -68,8 +68,12 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) error {
 
 func execute(ctx context.Context, q engine.Query, tables map[string]format.Table) (engine.Result, error) {
 	var decoder *video.Decoder
+	var detector *video.Detector
 	var temp string
 	defer func() {
+		if detector != nil {
+			detector.Close()
+		}
 		if temp != "" {
 			os.RemoveAll(temp)
 		}
@@ -78,7 +82,7 @@ func execute(ctx context.Context, q engine.Query, tables map[string]format.Table
 	resolve := func(value any) (video.Reference, error) {
 		frame, ok := value.(format.Frame)
 		if !ok {
-			return video.Reference{}, fmt.Errorf("motion expects frame values, got %T", value)
+			return video.Reference{}, fmt.Errorf("expected frame values, got %T", value)
 		}
 		source, exists := sources[frame.Source]
 		if !exists {
@@ -97,18 +101,43 @@ func execute(ctx context.Context, q engine.Query, tables map[string]format.Table
 		id := fmt.Sprintf("%s-%d-%d", source.Key, frame.TrackID, frame.SampleIndex)
 		return video.Reference{ID: id, Source: source, Frame: frame}, nil
 	}
-	functions := engine.Functions{"motion": {Arity: 2, Evaluate: func(callCtx context.Context, args [][]any) ([]any, error) {
+	initialize := func() error {
 		if decoder == nil {
 			var err error
 			temp, err = os.MkdirTemp("", "binaryquery-functions-")
 			if err != nil {
-				return nil, err
+				return err
 			}
 			decoder = video.NewDecoder(temp)
+			detector = video.NewDetector(decoder)
+		}
+		return nil
+	}
+	functions := engine.Functions{"motion": {Arity: 2, Evaluate: func(callCtx context.Context, args [][]any) ([]any, error) {
+		if err := initialize(); err != nil {
+			return nil, err
 		}
 		return video.Motion(decoder, resolve).Evaluate(callCtx, args)
 	}}}
-	bounded, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	functions["person_count"] = engine.Function{Arity: 1, MaxBatchSize: video.DetectionBatchSize, Evaluate: func(callCtx context.Context, args [][]any) ([]any, error) {
+		if err := initialize(); err != nil {
+			return nil, err
+		}
+		return video.PersonCount(detector, resolve).Evaluate(callCtx, args)
+	}}
+	functions["object_count"] = engine.Function{Arity: 2, MaxBatchSize: video.DetectionBatchSize, Evaluate: func(callCtx context.Context, args [][]any) ([]any, error) {
+		if err := initialize(); err != nil {
+			return nil, err
+		}
+		return video.ObjectCount(detector, resolve).Evaluate(callCtx, args)
+	}}
+	var bounded context.Context
+	var cancel context.CancelFunc
+	if q.UsesFunction("person_count", "object_count") {
+		bounded, cancel = context.WithCancel(ctx)
+	} else {
+		bounded, cancel = context.WithTimeout(ctx, 2*time.Minute)
+	}
 	defer cancel()
 	return q.ExecuteWith(bounded, tables, functions)
 }

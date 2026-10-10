@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +21,104 @@ func command(ctx context.Context, program string, args ...string) ([]byte, error
 		return nil, fmt.Errorf("%v: %s", err, data)
 	}
 	return data, nil
+}
+
+// Verify the unlimited real movie query delivers a match before the rest of
+// the movie is scanned. Stop after the first match to keep this test bounded.
+func TestFullVideoPeopleQueryStreams(t *testing.T) {
+	path := os.Getenv("BQUERY_TEST_DETECTION_VIDEO")
+	if path == "" {
+		t.Skip("set BQUERY_TEST_DETECTION_VIDEO to a local video containing people")
+	}
+	s := newTestServer(t, path)
+	server := httptest.NewServer(s)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	body := []byte(`{"sql":"SELECT frame, path, pts_seconds, person_count(frame) AS people FROM frames WHERE person_count(frame) > 0 ORDER BY path, pts_seconds"}`)
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/api/query/stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	decoder := json.NewDecoder(response.Body)
+	for {
+		var event streamEvent
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == "error" || event.Type == "done" {
+			t.Fatalf("no early matching row: %+v", event)
+		}
+		if event.Type != "rows" {
+			continue
+		}
+		if len(event.Rows) != 1 || event.Rows[0]["people"].(float64) <= 0 {
+			t.Fatalf("%+v", event)
+		}
+		t.Logf("first detection at %.3f seconds, %v people", event.Rows[0]["pts_seconds"], event.Rows[0]["people"])
+		cancel()
+		break
+	}
+}
+
+// Optional real-model test. Supply a local image known to contain people. The
+// normal automatic detector setup is used; no model/runtime overrides are needed.
+func TestPeopleDetectionIntegration(t *testing.T) {
+	image := os.Getenv("BQUERY_TEST_DETECTION_IMAGE")
+	if image == "" {
+		t.Skip("set BQUERY_TEST_DETECTION_IMAGE for real-model coverage")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	dir := t.TempDir()
+	people, empty := filepath.Join(dir, "people.mp4"), filepath.Join(dir, "empty.mp4")
+	if _, err := command(ctx, "ffmpeg", "-v", "error", "-loop", "1", "-i", image, "-t", "1", "-r", "2", "-vf", "scale=640:-2", "-c:v", "mpeg4", people); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := command(ctx, "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=black:size=640x480:rate=2", "-t", "1", "-c:v", "mpeg4", empty); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer(t, people, empty)
+	w := request(s, "POST", "/api/query", []byte(`{"sql":"SELECT frame, path, person_count(frame) AS people, object_count(frame, 'person') AS objects FROM frames"}`))
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	var result struct {
+		Rows []struct {
+			Frame           FrameValue
+			Path            string
+			People, Objects int
+		}
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 4 {
+		t.Fatalf("%+v", result)
+	}
+	for _, row := range result.Rows {
+		if row.Frame.ID == "" || row.People != row.Objects {
+			t.Fatalf("%+v", row)
+		}
+		if row.Path == "people.mp4" && row.People <= 0 {
+			t.Fatal("missed people in fixture")
+		}
+		if row.Path == "empty.mp4" && row.People != 0 {
+			t.Fatal("detected people in black frame")
+		}
+	}
+	// The streaming filter exercises the same cached detections through the
+	// workbench API and excludes all negative frames.
+	w = request(s, "POST", "/api/query/stream", []byte(`{"sql":"SELECT frame, path, person_count(frame) AS people FROM frames WHERE person_count(frame) > 0"}`))
+	if w.Code != 200 || bytes.Contains(w.Body.Bytes(), []byte(`"type":"error"`)) || bytes.Contains(w.Body.Bytes(), []byte("empty.mp4")) || !bytes.Contains(w.Body.Bytes(), []byte("people.mp4")) {
+		t.Fatal(w.Body.String())
+	}
 }
 
 // A generated moving pattern makes selecting the wrong B-frame observable.

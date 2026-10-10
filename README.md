@@ -136,15 +136,94 @@ Like other window functions, LAG cannot appear in WHERE or inside another LAG.
 Result ordering accepts input column names and output aliases, with ASC/DESC and
 NULLS FIRST/LAST (defaults: LAST for ASC, FIRST for DESC).
 
+### Object detection
+
+`person_count(frame)` counts detected people. `object_count(frame, 'car')` counts
+a named object class supported by the loaded model. Class names are case
+insensitive; unknown names produce an error. Null frames or class names return
+null. Counts represent detections in individual frames, not unique people across
+a video. The **People** workbench example checks the first 100 frames of each
+video track (only about four seconds at 24 fps):
+
+```sql
+SELECT frame, path, pts_seconds, person_count(frame) AS people
+FROM frames
+WHERE sample_index <= 100
+  AND person_count(frame) > 0
+ORDER BY path, pts_seconds
+```
+
+For every frame in a later section, replace `sample_index <= 100` with a time
+range such as `pts_seconds >= 60 AND pts_seconds < 70`.
+For large videos, time ranges can reduce detection work. With `LIMIT`, detection
+filters scan small batches and stop after enough matches when there are no
+window functions and ordering uses input fields (such as `path, pts_seconds`).
+`OFFSET` counts matching rows. Ordering by a computed value or using windows
+requires the relevant complete input. Detection calls are automatically split
+into batches of at most 32 frames; long scans are not limited to 4,096 frames.
+Detection queries have no fixed duration limit; use **Cancel query** to stop a
+long scan. Browser disconnects and CLI Ctrl+C also cancel detection.
+
+Detection works with the normal CLI and web commands; no detection settings are
+required. It runs locally on CPU through Go bindings to ONNX Runtime, with no
+Python, pip, C compiler, or manual model installation:
+
+```sh
+go run ./cmd/bquery-web video.mp4
+# Or use the same functions in the CLI:
+go run ./cmd/bquery -query 'SELECT pts_seconds, person_count(frame) AS people FROM frames LIMIT 10' video.mp4
+```
+
+The first detection query automatically downloads the YOLO11n ONNX model and the
+official Microsoft ONNX Runtime CPU library, verifies their pinned SHA-256
+checksums, and caches them under the user cache directory's
+`binaryquery/detection` folder (on Linux, typically `~/.cache/binaryquery/detection`).
+First use needs internet access and downloads about 19 MB on Linux amd64. Later
+queries reuse the cache and run offline. Interrupted downloads are discarded
+and retried on the next query. No downloads happen for metadata or motion queries.
+FFmpeg and FFprobe are still needed for frame decoding.
+
+Automatic detection supports Linux and macOS on amd64 and arm64. The Go binary
+builds with `CGO_ENABLED=0`; inference uses the automatically managed native
+ONNX Runtime library. The default model recognizes the 80 COCO classes, including
+people, cars, buses, bicycles, and animals. Detections use exact-sample preview
+JPEGs, RGB letterboxing at 640 × 640, and class-aware nonmaximum suppression
+with an IoU threshold of 0.7 and at most 300 detections per frame. Small or obscured
+objects may be missed.
+
+Optional overrides, set before starting the CLI or server:
+
+- `BQUERY_DETECTION_CACHE`: directory for cached model and runtime assets.
+- `BQUERY_DETECTION_CONFIDENCE`: threshold greater than zero and at most one;
+  defaults to `0.25`.
+- `BQUERY_DETECTION_MODEL`: existing local ONNX model with one RGB NCHW
+  `[1,3,640,640]` input and a COCO detection output `[1,84,N]` or `[1,N,6]`.
+  PyTorch `.pt` files are not supported; unset the override to use the default.
+
+The model stays loaded across queries. Temporary analysis JPEGs are released
+after each inference batch; preview images remain separate. Counts for all classes are cached together
+for up to 4,096 frames, so filtering and projecting counts, or querying another
+class, reuse inference. Source files are checked even on cache hits. Downloads,
+decoding, and work between inference calls respect cancellation; an active native
+inference call finishes before cancellation returns. Stopping the server releases
+the detector's native resources.
+
+For optional real-model API coverage, set `BQUERY_TEST_DETECTION_IMAGE` to a local
+image known to contain people and run `go test ./app -run TestPeopleDetectionIntegration`.
+The test uses the same automatic setup as ordinary queries.
+
 Scalar functions use the engine's `Functions` registry and evaluate batches of
-argument tuples. Motion deduplicates frame references and decodes each source
+argument tuples. A function's optional `MaxBatchSize` bounds each invocation.
+Motion deduplicates frame references and decodes each source
 track in a batch; the grayscale cache is shared with the preview decoder's
 sample index. With a simple SELECT and LIMIT, only frames needed for the result
 are decoded. Filtering or ordering by a computed score may require evaluating
 more rows. A motion batch is capped at 4,096 distinct frames; narrow the input
 range or use LIMIT before expensive calculations for larger videos. Queries
-using decoding have a two-minute timeout. Window layouts and subquery results
-need their full relevant input before dependent rows can be produced. Ordering
+without object detection have a two-minute timeout. Window layouts and subquery results
+need their full relevant input before dependent rows can be produced. Filters
+with input-field ordering stream matching rows after each small scan batch,
+including when no LIMIT is set. Ordering
 by a computed score also evaluates that score before ordered rows can stream.
 Ordinary scalar projections stream a first row, then batches of 8 and 32 rows;
 `LAG` retains its complete partition across these batches. The first row of a
@@ -158,7 +237,7 @@ complete JSON response for other clients.
 
 ## Run
 
-Requires Go 1.26 or newer. No external Go dependencies.
+Requires Go 1.26 or newer. Go module dependencies are fetched automatically by Go.
 
 ```sh
 go build -o bquery ./cmd/bquery
@@ -239,7 +318,7 @@ Literals are
 numbers, `null`, `true`/`false`, or single-quoted strings (escape a quote
 as `''`). Comparisons are type-sensitive; unknown predicates do not match. A trailing
 semicolon is accepted. Expressions support columns, literals, registered scalar
-functions (currently `motion`), and `LAG(...) OVER (...)`. No joins, aggregation,
+functions (`motion`, `person_count`, `object_count`), and `LAG(...) OVER (...)`. No joins, aggregation,
 OR, arithmetic operators, CTEs, qualified/quoted identifiers, named windows,
 window-frame clauses, or other window functions yet. Subqueries require an
 alias. Row order follows input order unless a final ORDER BY is supplied.
@@ -251,7 +330,7 @@ alias. Row order follows input order unless a final ORDER BY is supplied.
 - `engine`: expressions, schema validation, filtering, LAG windows, batch
   function evaluation, subqueries, ordering, projection, and limit.
 - `video`: reusable exact-sample decoder, preview/grayscale representations,
-  and the motion scalar function.
+  motion, and an automatically initialized local YOLO ONNX detector.
 - `cmd/bquery`: local-file adapter selection and JSON output.
 - `app`: embedded HTML/CSS/JS workbench, uploads, JSON query API, exact raw
   sample downloads, and FFmpeg preview rendering.
@@ -284,7 +363,7 @@ fragments do not contribute frame rows. External sample data references are not
 supported: samples must reside in the source file's media data boxes.
 Durations reflect declared headers, not decoded playback;
 unknown declared durations remain null. Preview decoding is separate from native
-query parsing; there is no semantic search of video contents. Format detection uses common leading box types,
+query parsing; object detection uses an optional model rather than metadata. Format detection uses common leading box types,
 followed by structural validation and a required movie box.
 
 To add a format, implement `format.Adapter` and register it in the CLI. Future

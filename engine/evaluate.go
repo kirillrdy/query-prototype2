@@ -90,7 +90,28 @@ func (e *evaluation) evaluate(expr *expression, active []int) ([]any, error) {
 					args[i][j] = x
 				}
 			}
-			values, err = e.functions[expr.name].Evaluate(e.ctx, args)
+			function := e.functions[expr.name]
+			batch := function.MaxBatchSize
+			if batch <= 0 {
+				batch = len(args)
+			}
+			values = make([]any, 0, len(args))
+			for start := 0; start < len(args); start += batch {
+				if err = e.ctx.Err(); err != nil {
+					break
+				}
+				end := min(start+batch, len(args))
+				var result []any
+				result, err = function.Evaluate(e.ctx, args[start:end])
+				if err != nil {
+					break
+				}
+				if len(result) != end-start {
+					err = fmt.Errorf("returned %d values for %d rows", len(result), end-start)
+					break
+				}
+				values = append(values, result...)
+			}
 			if err != nil {
 				err = fmt.Errorf("%s: %w", expr.name, err)
 			}

@@ -47,6 +47,7 @@ type Server struct {
 	sources  []*source
 	temp     string
 	renderer *renderer
+	detector *video.Detector
 	handler  http.Handler
 }
 
@@ -56,6 +57,7 @@ func New(ctx context.Context, paths []string) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{temp: temp, renderer: newRenderer(temp)}
+	s.detector = video.NewDetector(s.renderer.decoder)
 	for _, path := range paths {
 		if err := s.addSource(ctx, path, filepath.Base(path)); err != nil {
 			s.Close()
@@ -100,7 +102,10 @@ func New(ctx context.Context, paths []string) (*Server, error) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.handler.ServeHTTP(w, r) }
-func (s *Server) Close() error                                     { return os.RemoveAll(s.temp) }
+func (s *Server) Close() error {
+	s.detector.Close()
+	return os.RemoveAll(s.temp)
+}
 
 func (s *Server) addSource(ctx context.Context, path, name string) error {
 	abs, err := filepath.Abs(path)
@@ -218,7 +223,13 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request, streaming 
 		fail(w, 400, fmt.Errorf("load a video first"))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if q.UsesFunction("person_count", "object_count") {
+		ctx, cancel = context.WithCancel(r.Context())
+	} else {
+		ctx, cancel = context.WithTimeout(r.Context(), 2*time.Minute)
+	}
 	defer cancel()
 	tableName := q.SourceTable()
 	if _, ok := mp4.Schemas()[tableName]; !ok {
@@ -238,7 +249,11 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request, streaming 
 		}
 		tables[tableName] = format.Append(tables[tableName], t)
 	}
-	functions := engine.Functions{"motion": video.Motion(s.renderer.decoder, s.resolveFrame)}
+	functions := engine.Functions{
+		"motion":       video.Motion(s.renderer.decoder, s.resolveFrame),
+		"person_count": video.PersonCount(s.detector, s.resolveFrame),
+		"object_count": video.ObjectCount(s.detector, s.resolveFrame),
+	}
 	if streaming {
 		s.streamQuery(ctx, w, q, tables, functions)
 		return

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"binaryquery/engine"
+	"binaryquery/format"
 )
 
 func TestMultiFileLimitAndAtomicOutput(t *testing.T) {
@@ -54,5 +55,17 @@ func TestMultiFileLimitAndAtomicOutput(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatal("emitted partial result on input failure")
+	}
+}
+
+func TestDetectionFunctionsRegisteredWithoutDependencies(t *testing.T) {
+	t.Setenv("BQUERY_DETECTION_MODEL", "")
+	q, err := engine.Parse("SELECT person_count(null) AS people, object_count(null, 'car') AS cars FROM files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := execute(context.Background(), q, map[string]format.Table{"files": {Columns: []string{"path"}, Rows: []format.Row{{"path": "unused"}}}})
+	if err != nil || len(r.Rows) != 1 || r.Rows[0]["people"] != nil || r.Rows[0]["cars"] != nil {
+		t.Fatalf("%+v %v", r, err)
 	}
 }

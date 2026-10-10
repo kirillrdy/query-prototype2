@@ -1,6 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const examples = {
+  people: "SELECT frame, path, pts_seconds, person_count(frame) AS people\nFROM frames\nWHERE sample_index <= 100\n  AND person_count(frame) > 0\nORDER BY path, pts_seconds",
 	 motion: "SELECT frame, pts_seconds,\n  motion(frame, LAG(frame) OVER (\n    PARTITION BY path, track_id\n    ORDER BY pts_seconds, sample_index\n  )) AS motion_score\nFROM frames\nORDER BY path, track_id, pts_seconds\nLIMIT 100",
   mixed: "SELECT frame, path, sample_index, pts_seconds\nFROM frames\nLIMIT 48",
   keyframes: "SELECT frame, path, pts_seconds, size\nFROM frames\nWHERE is_keyframe = true\nLIMIT 100",

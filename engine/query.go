@@ -5,6 +5,7 @@ import (
 	"binaryquery/format"
 	"context"
 	"fmt"
+	"strings"
 )
 
 type Query struct {
@@ -47,8 +48,10 @@ type Result struct {
 // Function evaluates a batch of argument tuples, returning one value per tuple.
 // Batch evaluation lets expensive binary functions decode distinct frames once.
 type Function struct {
-	Arity    int
-	Evaluate func(context.Context, [][]any) ([]any, error)
+	Arity int
+	// MaxBatchSize optionally bounds each call while preserving result order.
+	MaxBatchSize int
+	Evaluate     func(context.Context, [][]any) ([]any, error)
 }
 type Functions map[string]Function
 
@@ -64,6 +67,40 @@ func (q Query) Execute(ctx context.Context, tables map[string]format.Table) (Res
 }
 func (q Query) ExecuteWith(ctx context.Context, tables map[string]format.Table, functions Functions) (Result, error) {
 	return q.executeWith(ctx, tables, functions, nil)
+}
+
+// UsesFunction inspects this query and its derived inputs without evaluating it.
+func (q Query) UsesFunction(names ...string) bool {
+	wanted := map[string]bool{}
+	for _, name := range names {
+		wanted[strings.ToLower(name)] = true
+	}
+	var uses func(*expression) bool
+	uses = func(e *expression) bool {
+		if e == nil {
+			return false
+		}
+		if e.kind == "call" && wanted[e.name] {
+			return true
+		}
+		for _, arg := range e.args {
+			if uses(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, s := range q.selects {
+		if uses(s.expression) {
+			return true
+		}
+	}
+	for _, p := range q.predicates {
+		if uses(p.left) || uses(p.right) || uses(p.upper) {
+			return true
+		}
+	}
+	return q.subquery != nil && q.subquery.UsesFunction(names...)
 }
 
 // Stream emits the schema, then complete result rows in order. The first row
@@ -140,6 +177,15 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 			return Result{}, err
 		}
 	}
+	if emit != nil && len(q.predicates) > 0 && !selectsHaveWindow(selects) {
+		order, eligible, err := q.filterOrder(ctx, table, aliases, functions)
+		if err != nil {
+			return Result{}, err
+		}
+		if eligible {
+			return Result{Columns: columns}, q.streamFiltered(ctx, table, selects, columns, functions, order, emit)
+		}
+	}
 	rows := table
 	predicates := q.predicates
 	// Simple scans can stop at LIMIT. Windows and sorting still see their
@@ -153,13 +199,25 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 		predicates = nil
 	}
 	rows = table
+	// Sorting by input fields can happen before filtering. This preserves SQL
+	// result order and lets LIMIT stop expensive predicates at enough matches.
+	if len(predicates) > 0 && q.limit >= 0 && !selectsHaveWindow(selects) {
+		order, eligible, err := q.filterOrder(ctx, table, aliases, functions)
+		if err != nil {
+			return Result{}, err
+		}
+		if eligible {
+			rows, err = filterComputedLimited(ctx, table, predicates, functions, order, pagePrefix(table.Len(), q.offset, q.limit))
+			if err != nil {
+				return Result{}, err
+			}
+			table = rows
+			predicates = nil
+		}
+	}
 	if len(predicates) > 0 {
 		input := newEvaluation(ctx, rows, functions)
 		active := indices(rows.Len())
-		matched := make([]bool, rows.Len())
-		for i := range matched {
-			matched[i] = true
-		}
 		for _, p := range predicates {
 			left, err := input.evaluate(p.left, active)
 			if err != nil {
@@ -179,6 +237,9 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 					return Result{}, err
 				}
 			}
+			// Evaluate each subsequent AND predicate only on surviving rows.
+			// A cheap sample/time filter can therefore bound frame inference.
+			selected := make([]int, 0, len(active))
 			for i, v := range left {
 				if i%1024 == 0 {
 					if err := ctx.Err(); err != nil {
@@ -192,15 +253,13 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 				if upper != nil {
 					high = upper[i]
 				}
-				matched[i] = matched[i] && matchesPredicate(p.op, v, bound, high)
+				if matchesPredicate(p.op, v, bound, high) {
+					selected = append(selected, active[i])
+				}
 			}
+			active = selected
 		}
-		selected := make([]int, 0)
-		for i, match := range matched {
-			if match {
-				selected = append(selected, i)
-			}
-		}
+		selected := active
 		rows = format.Table{Columns: table.Columns, Count: len(selected), ValueAt: func(i int, c string) any { return table.Value(selected[i], c) }}
 	}
 	e := newEvaluation(ctx, rows, functions)
@@ -278,6 +337,24 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 }
 
 func boundedScan(selects []selection, predicates []predicate) bool {
+	if selectsHaveWindow(selects) {
+		return false
+	}
+	for _, p := range predicates {
+		if p.left.kind != "column" && p.left.kind != "literal" {
+			return false
+		}
+		if p.right != nil && p.right.kind != "column" && p.right.kind != "literal" {
+			return false
+		}
+		if p.upper != nil && p.upper.kind != "column" && p.upper.kind != "literal" {
+			return false
+		}
+	}
+	return true
+}
+
+func selectsHaveWindow(selects []selection) bool {
 	var hasWindow func(*expression) bool
 	hasWindow = func(e *expression) bool {
 		if e.kind == "lag" {
@@ -292,21 +369,10 @@ func boundedScan(selects []selection, predicates []predicate) bool {
 	}
 	for _, s := range selects {
 		if hasWindow(s.expression) {
-			return false
+			return true
 		}
 	}
-	for _, p := range predicates {
-		if p.left.kind != "column" && p.left.kind != "literal" {
-			return false
-		}
-		if p.right != nil && p.right.kind != "column" && p.right.kind != "literal" {
-			return false
-		}
-		if p.upper != nil && p.upper.kind != "column" && p.upper.kind != "literal" {
-			return false
-		}
-	}
-	return true
+	return false
 }
 
 func filterLimited(ctx context.Context, table format.Table, predicates []predicate, limit int) (format.Table, error) {

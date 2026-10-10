@@ -20,7 +20,7 @@ func (r *renderer) prepare(ctx context.Context, src *source, track uint32, frame
 func (s *Server) resolveFrame(value any) (video.Reference, error) {
 	frame, ok := value.(FrameValue)
 	if !ok {
-		return video.Reference{}, fmt.Errorf("motion expects frame values, got %T", value)
+		return video.Reference{}, fmt.Errorf("expected frame values, got %T", value)
 	}
 	src, data, err := s.lookup(frame.ID)
 	if err != nil {

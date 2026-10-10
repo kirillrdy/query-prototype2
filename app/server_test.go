@@ -75,6 +75,20 @@ func TestQueryProjectionAndErrors(t *testing.T) {
 	}
 }
 
+func TestDetectionFunctionsRegisteredWithoutDependencies(t *testing.T) {
+	t.Setenv("BQUERY_DETECTION_MODEL", "")
+	s := newTestServer(t, emptyMovie(t))
+	for _, endpoint := range []string{"/api/query", "/api/query/stream"} {
+		w := request(s, "POST", endpoint, []byte(`{"sql":"SELECT person_count(null) AS people, object_count(null, 'car') AS cars FROM files"}`))
+		if w.Code != 200 {
+			t.Fatalf("%s: %s", endpoint, w.Body.String())
+		}
+		if !bytes.Contains(w.Body.Bytes(), []byte(`"people":null`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"cars":null`)) {
+			t.Fatal(w.Body.String())
+		}
+	}
+}
+
 func TestUploadAndLocalOrigin(t *testing.T) {
 	s := newTestServer(t)
 	var body bytes.Buffer

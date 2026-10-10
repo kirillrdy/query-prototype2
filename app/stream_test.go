@@ -111,3 +111,49 @@ func TestStreamProtocolUncappedAndPartialErrors(t *testing.T) {
 		t.Fatal("invalid query should fail before streaming")
 	}
 }
+
+func TestOrderedDetectionFilterFlushesMatchesAndCancels(t *testing.T) {
+	s := newTestServer(t)
+	q, _ := engine.Parse("SELECT n, detect(n) AS people FROM frames WHERE detect(n) > 0 ORDER BY n")
+	tables := map[string]format.Table{"frames": {Columns: []string{"n"}, Count: 6000, ValueAt: func(i int, _ string) any { return i }}}
+	canceled := make(chan struct{})
+	functions := engine.Functions{"detect": {Arity: 1, MaxBatchSize: 32, Evaluate: func(ctx context.Context, args [][]any) ([]any, error) {
+		if args[0][0].(int) >= 32 {
+			<-ctx.Done()
+			close(canceled)
+			return nil, ctx.Err()
+		}
+		out := make([]any, len(args))
+		for i := range out {
+			out[i] = 1
+		}
+		return out, nil
+	}}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.streamQuery(r.Context(), w, q, tables, functions) }))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r, _ := http.NewRequestWithContext(ctx, "POST", server.URL, nil)
+	response, err := http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	decoder := json.NewDecoder(response.Body)
+	var schema, first streamEvent
+	if err := decoder.Decode(&schema); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Type != "schema" || first.Type != "rows" || len(first.Rows) != 1 || first.Rows[0]["n"] != float64(0) {
+		t.Fatalf("%+v %+v", schema, first)
+	}
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("long detection scan ignored disconnect")
+	}
+}
