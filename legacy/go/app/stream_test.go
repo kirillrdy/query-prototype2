@@ -117,8 +117,10 @@ func TestOrderedDetectionFilterFlushesMatchesAndCancels(t *testing.T) {
 	q, _ := engine.Parse("SELECT n, detect(n) AS people FROM frames WHERE detect(n) > 0 ORDER BY n")
 	tables := map[string]format.Table{"frames": {Columns: []string{"n"}, Count: 6000, ValueAt: func(i int, _ string) any { return i }}}
 	canceled := make(chan struct{})
+	inferenceStarted := make(chan struct{})
 	functions := engine.Functions{"detect": {Arity: 1, MaxBatchSize: 32, Evaluate: func(ctx context.Context, args [][]any) ([]any, error) {
 		if args[0][0].(int) >= 32 {
+			close(inferenceStarted)
 			<-ctx.Done()
 			close(canceled)
 			return nil, ctx.Err()
@@ -149,6 +151,13 @@ func TestOrderedDetectionFilterFlushesMatchesAndCancels(t *testing.T) {
 	}
 	if schema.Type != "schema" || first.Type != "rows" || len(first.Rows) != 1 || first.Rows[0]["n"] != float64(0) {
 		t.Fatalf("%+v %+v", schema, first)
+	}
+	// Wait until the callback under test is running. Canceling on the first
+	// flushed row can stop the scan before it enters that callback.
+	select {
+	case <-inferenceStarted:
+	case <-ctx.Done():
+		t.Fatal("stream did not reach inference")
 	}
 	cancel()
 	select {

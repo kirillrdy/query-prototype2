@@ -43,12 +43,13 @@ type source struct {
 	frames         map[string]format.Frame
 }
 type Server struct {
-	mu       sync.RWMutex
-	sources  []*source
-	temp     string
-	renderer *renderer
-	detector *video.Detector
-	handler  http.Handler
+	mu        sync.RWMutex
+	sources   []*source
+	temp      string
+	renderer  *renderer
+	detector  *video.Detector
+	segmenter *video.Segmenter
+	handler   http.Handler
 }
 
 func New(ctx context.Context, paths []string) (*Server, error) {
@@ -58,6 +59,7 @@ func New(ctx context.Context, paths []string) (*Server, error) {
 	}
 	s := &Server{temp: temp, renderer: newRenderer(temp)}
 	s.detector = video.NewDetector(s.renderer.decoder)
+	s.segmenter = video.NewSegmenter(s.renderer.decoder)
 	for _, path := range paths {
 		if err := s.addSource(ctx, path, filepath.Base(path)); err != nil {
 			s.Close()
@@ -104,6 +106,7 @@ func New(ctx context.Context, paths []string) (*Server, error) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.handler.ServeHTTP(w, r) }
 func (s *Server) Close() error {
 	s.detector.Close()
+	s.segmenter.Close()
 	return os.RemoveAll(s.temp)
 }
 
@@ -225,7 +228,7 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request, streaming 
 	}
 	var ctx context.Context
 	var cancel context.CancelFunc
-	if q.UsesFunction("person_count", "object_count") {
+	if q.UsesFunction("person_count", "object_count", "sam3", "sam3_count", "sam3_score") {
 		ctx, cancel = context.WithCancel(r.Context())
 	} else {
 		ctx, cancel = context.WithTimeout(r.Context(), 2*time.Minute)
@@ -253,6 +256,9 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request, streaming 
 		"motion":       video.Motion(s.renderer.decoder, s.resolveFrame),
 		"person_count": video.PersonCount(s.detector, s.resolveFrame),
 		"object_count": video.ObjectCount(s.detector, s.resolveFrame),
+		"sam3":         video.SAM3(s.segmenter, s.resolveFrame),
+		"sam3_count":   video.SAM3Count(s.segmenter, s.resolveFrame),
+		"sam3_score":   video.SAM3Score(s.segmenter, s.resolveFrame),
 	}
 	if streaming {
 		s.streamQuery(ctx, w, q, tables, functions)

@@ -79,12 +79,17 @@ func TestDetectionFunctionsRegisteredWithoutDependencies(t *testing.T) {
 	t.Setenv("BQUERY_DETECTION_MODEL", "")
 	s := newTestServer(t, emptyMovie(t))
 	for _, endpoint := range []string{"/api/query", "/api/query/stream"} {
-		w := request(s, "POST", endpoint, []byte(`{"sql":"SELECT person_count(null) AS people, object_count(null, 'car') AS cars FROM files"}`))
+		w := request(s, "POST", endpoint, []byte(`{"sql":"SELECT person_count(null) AS people, object_count(null, 'car') AS cars, sam3(null, 'person') AS masks, sam3_count(null, 'person') AS count, sam3_score(null, 'person') AS score FROM files"}`))
 		if w.Code != 200 {
 			t.Fatalf("%s: %s", endpoint, w.Body.String())
 		}
 		if !bytes.Contains(w.Body.Bytes(), []byte(`"people":null`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"cars":null`)) {
 			t.Fatal(w.Body.String())
+		}
+		for _, column := range []string{"masks", "count", "score"} {
+			if !bytes.Contains(w.Body.Bytes(), []byte(`"`+column+`":null`)) {
+				t.Fatal(w.Body.String())
+			}
 		}
 	}
 }

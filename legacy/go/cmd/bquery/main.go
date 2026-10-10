@@ -69,8 +69,12 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) error {
 func execute(ctx context.Context, q engine.Query, tables map[string]format.Table) (engine.Result, error) {
 	var decoder *video.Decoder
 	var detector *video.Detector
+	var segmenter *video.Segmenter
 	var temp string
 	defer func() {
+		if segmenter != nil {
+			segmenter.Close()
+		}
 		if detector != nil {
 			detector.Close()
 		}
@@ -110,6 +114,7 @@ func execute(ctx context.Context, q engine.Query, tables map[string]format.Table
 			}
 			decoder = video.NewDecoder(temp)
 			detector = video.NewDetector(decoder)
+			segmenter = video.NewSegmenter(decoder)
 		}
 		return nil
 	}
@@ -132,8 +137,18 @@ func execute(ctx context.Context, q engine.Query, tables map[string]format.Table
 		return video.ObjectCount(detector, resolve).Evaluate(callCtx, args)
 	}}
 	var bounded context.Context
+	for name, makeFunction := range map[string]func(*video.Segmenter, video.Resolver) engine.Function{
+		"sam3": video.SAM3, "sam3_count": video.SAM3Count, "sam3_score": video.SAM3Score,
+	} {
+		functions[name] = engine.Function{Arity: 2, MaxBatchSize: 8, Evaluate: func(callCtx context.Context, args [][]any) ([]any, error) {
+			if err := initialize(); err != nil {
+				return nil, err
+			}
+			return makeFunction(segmenter, resolve).Evaluate(callCtx, args)
+		}}
+	}
 	var cancel context.CancelFunc
-	if q.UsesFunction("person_count", "object_count") {
+	if q.UsesFunction("person_count", "object_count", "sam3", "sam3_count", "sam3_score") {
 		bounded, cancel = context.WithCancel(ctx)
 	} else {
 		bounded, cancel = context.WithTimeout(ctx, 2*time.Minute)

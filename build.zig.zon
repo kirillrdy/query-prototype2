@@ -1,0 +1,8 @@
+.{
+    .name = .binaryquery,
+    .version = "0.1.0",
+    .fingerprint = 0x736894412beed1a6,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{ .sam3 = .{ .path = "../sam3" } },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
+}

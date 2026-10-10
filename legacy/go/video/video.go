@@ -40,6 +40,7 @@ type Representation string
 const Preview Representation = "preview"
 const Gray Representation = "gray"
 const Detection Representation = "detection"
+const Segmentation Representation = "segmentation"
 
 func (r Representation) options() (suffix, filter string, args []string, err error) {
 	switch r {
@@ -47,6 +48,8 @@ func (r Representation) options() (suffix, filter string, args []string, err err
 		return ".jpg", ",scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease", []string{"-q:v", "2"}, nil
 	case Detection:
 		return ".detect.jpg", ",scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease", []string{"-q:v", "2"}, nil
+	case Segmentation:
+		return ".sam3.png", ",scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease", []string{"-c:v", "png"}, nil
 	case Gray:
 		return ".gray", ",scale=160:90,format=gray", []string{"-c:v", "rawvideo", "-pix_fmt", "gray", "-f", "image2"}, nil
 	}

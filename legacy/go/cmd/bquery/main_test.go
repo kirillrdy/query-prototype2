@@ -60,12 +60,12 @@ func TestMultiFileLimitAndAtomicOutput(t *testing.T) {
 
 func TestDetectionFunctionsRegisteredWithoutDependencies(t *testing.T) {
 	t.Setenv("BQUERY_DETECTION_MODEL", "")
-	q, err := engine.Parse("SELECT person_count(null) AS people, object_count(null, 'car') AS cars FROM files")
+	q, err := engine.Parse("SELECT person_count(null) AS people, object_count(null, 'car') AS cars, sam3(null, 'person') AS masks, sam3_count(null, 'person') AS count, sam3_score(null, 'person') AS score FROM files")
 	if err != nil {
 		t.Fatal(err)
 	}
 	r, err := execute(context.Background(), q, map[string]format.Table{"files": {Columns: []string{"path"}, Rows: []format.Row{{"path": "unused"}}}})
-	if err != nil || len(r.Rows) != 1 || r.Rows[0]["people"] != nil || r.Rows[0]["cars"] != nil {
+	if err != nil || len(r.Rows) != 1 || r.Rows[0]["people"] != nil || r.Rows[0]["cars"] != nil || r.Rows[0]["masks"] != nil || r.Rows[0]["count"] != nil || r.Rows[0]["score"] != nil {
 		t.Fatalf("%+v %v", r, err)
 	}
 }

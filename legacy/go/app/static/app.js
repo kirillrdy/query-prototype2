@@ -91,7 +91,7 @@ function renderTable() {
         const button = text("button", `▣ Frame ${value.sample_index}`, "frame-cell"); button.title = `${value.size} encoded bytes · preview frame`; button.dataset.frame = value.id;
         button.addEventListener("click", () => { stop(); const p = queue.findIndex(f => f.id === value.id); if (p >= 0) { position = p; updatePosition(); } show(value).catch(e => message(e.message, "error")); }); td.append(button);
       } else if (value == null) td.append(text("span", "null", "null"));
-      else td.textContent = typeof value === "number" && !Number.isInteger(value) ? Number(value.toFixed(6)).toString() : String(value);
+      else td.textContent = typeof value === "object" ? JSON.stringify(value) : typeof value === "number" && !Number.isInteger(value) ? Number(value.toFixed(6)).toString() : String(value);
       tr.append(td);
     } body.append(tr);
   });
