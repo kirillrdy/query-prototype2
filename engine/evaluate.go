@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 	"strings"
@@ -237,6 +238,33 @@ func rational(v any) (*big.Rat, bool) {
 	return nil, false
 }
 func compare(a, b any) (int, bool) {
+	// Native comparisons keep sorting large frame timelines inexpensive. Mixed
+	// numeric types retain the exact rational fallback (including large uints).
+	switch x := a.(type) {
+	case float64:
+		if y, ok := b.(float64); ok {
+			if math.IsNaN(x) || math.IsNaN(y) {
+				return 0, false
+			}
+			return orderedCompare(x, y), true
+		}
+	case int:
+		if y, ok := b.(int); ok {
+			return orderedCompare(x, y), true
+		}
+	case int64:
+		if y, ok := b.(int64); ok {
+			return orderedCompare(x, y), true
+		}
+	case uint32:
+		if y, ok := b.(uint32); ok {
+			return orderedCompare(x, y), true
+		}
+	case uint64:
+		if y, ok := b.(uint64); ok {
+			return orderedCompare(x, y), true
+		}
+	}
 	if x, ok := rational(a); ok {
 		y, ok := rational(b)
 		if !ok {
@@ -263,6 +291,16 @@ func compare(a, b any) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func orderedCompare[T ~int | ~int64 | ~uint32 | ~uint64 | ~float64](a, b T) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
 }
 func compareOp(cmp int, op string) bool {
 	switch op {

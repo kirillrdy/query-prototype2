@@ -62,6 +62,19 @@ func (q Query) Execute(ctx context.Context, tables map[string]format.Table) (Res
 	return q.ExecuteWith(ctx, tables, nil)
 }
 func (q Query) ExecuteWith(ctx context.Context, tables map[string]format.Table, functions Functions) (Result, error) {
+	return q.executeWith(ctx, tables, functions, nil)
+}
+
+// Stream emits the schema, then complete result rows in order. The first row
+// is evaluated separately; later rows use small batches to amortize decoding.
+// Sorting, window layouts, and derived inputs finish before their dependent rows.
+// A callback error stops evaluation immediately, providing backpressure.
+func (q Query) Stream(ctx context.Context, tables map[string]format.Table, functions Functions, emit func(Result) error) error {
+	_, err := q.executeWith(ctx, tables, functions, emit)
+	return err
+}
+
+func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, functions Functions, emit func(Result) error) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
@@ -114,6 +127,11 @@ func (q Query) ExecuteWith(ctx context.Context, tables map[string]format.Table, 
 	for _, o := range q.order {
 		if !known[o.column] && aliases[o.column] == nil {
 			return Result{}, fmt.Errorf("unknown ORDER BY column %q", o.column)
+		}
+	}
+	if emit != nil {
+		if err := emit(Result{Columns: columns}); err != nil {
+			return Result{}, err
 		}
 	}
 	rows := table
@@ -200,18 +218,45 @@ func (q Query) ExecuteWith(ctx context.Context, tables map[string]format.Table, 
 	if q.limit >= 0 && len(active) > q.limit {
 		active = active[:q.limit]
 	}
-	result := Result{Columns: columns, Rows: make([]format.Row, len(active))}
-	for i := range result.Rows {
-		result.Rows[i] = format.Row{}
-	}
-	for _, s := range selects {
-		values, err := e.evaluate(s.expression, active)
-		if err != nil {
+	result := Result{Columns: columns, Rows: make([]format.Row, 0)}
+	for start := 0; start < len(active); {
+		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		for i, v := range values {
-			result.Rows[i][s.name] = v
+		end := len(active)
+		if emit != nil {
+			batch := 32
+			if start == 1 {
+				batch = 8
+			}
+			if start == 0 {
+				batch = 1
+			}
+			if end > start+batch {
+				end = start + batch
+			}
 		}
+		chunk := Result{Columns: columns, Rows: make([]format.Row, end-start)}
+		for i := range chunk.Rows {
+			chunk.Rows[i] = format.Row{}
+		}
+		for _, s := range selects {
+			values, err := e.evaluate(s.expression, active[start:end])
+			if err != nil {
+				return Result{}, err
+			}
+			for i, v := range values {
+				chunk.Rows[i][s.name] = v
+			}
+		}
+		if emit != nil {
+			if err := emit(chunk); err != nil {
+				return Result{}, err
+			}
+		} else {
+			result.Rows = append(result.Rows, chunk.Rows...)
+		}
+		start = end
 	}
 	return result, nil
 }

@@ -45,13 +45,18 @@ Previews require `ffmpeg` and `ffprobe` on PATH. Metadata queries and binary
 downloads work without them. FFprobe maps decoded pictures to exact sample byte
 positions, so B-frames are identified correctly; FFmpeg then decodes the source
 with its required reference pictures and exports only the selected pictures.
-The first preview indexes the decoded track and may take time for long videos.
+The decoder indexes only the prefix needed to identify the requested samples,
+and stops as soon as those samples are mapped. Later requests extend this cache.
+Selections late in a movie still require decoding their preceding frames.
 Preview images are cached JPEGs, scaled to fit 1280 × 720 without enlarging.
 The downloaded `.bin` is an encoded sample, which may require codec headers and
 other frames to decode; it is not a standalone video file.
 
 The server binds to localhost only; use `-port 8090` to choose another port.
-Queries are capped at 500 result rows in the UI, with a visible truncation note;
+The workbench streams complete rows as they become available, displays first-row
+latency, and provides **Cancel query**. Received rows remain available if canceled
+or interrupted, with an explicit incomplete-result notice. Queries are capped
+at 500 result rows in the UI, with a visible truncation note;
 the CLI has no UI row cap. The session accepts up to 16 files. Uploads stream
 to disk with no fixed size limit; use a local path for large files to avoid
 copying the entire video. Uploads and preview caches live in a temporary
@@ -130,7 +135,18 @@ sample index. With a simple SELECT and LIMIT, only frames needed for the result
 are decoded. Filtering or ordering by a computed score may require evaluating
 more rows. A motion batch is capped at 4,096 distinct frames; narrow the input
 range or use LIMIT before expensive calculations for larger videos. Queries
-using decoding have a two-minute timeout. Window/subquery rows are materialized.
+using decoding have a two-minute timeout. Window layouts and subquery results
+need their full relevant input before dependent rows can be produced. Ordering
+by a computed score also evaluates that score before ordered rows can stream.
+Ordinary scalar projections stream a first row, then batches of 8 and 32 rows;
+`LAG` retains its complete partition across these batches. The first row of a
+motion/LAG partition can be emitted with a null score before any decoding.
+
+The web UI uses `POST /api/query/stream` with a JSON `{"sql": "..."}` body.
+Its `application/x-ndjson` response contains `schema` (columns), `rows` (complete
+row batches), then `done` (truncation flag), or `error` after a partial result.
+Each event is flushed immediately. `POST /api/query` retains the original
+complete JSON response for other clients.
 
 ## Run
 

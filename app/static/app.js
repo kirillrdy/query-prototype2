@@ -9,6 +9,7 @@ const examples = {
 let result = { columns: [], rows: [] }, selection = new Set(), queue = [], position = 0;
 let generation = 0, previewVersion = 0, playbackVersion = 0, playing = false, decoderAvailable = false;
 const ready = new Set(), images = new Map();
+let queryController = null;
 const frameValues = row => Object.values(row).filter(v => v && typeof v === "object" && v.type === "frame" && v.id);
 function message(text, kind = "") { $("message").textContent = text; $("message").className = "message " + kind; }
 function text(tag, value, className) { const el = document.createElement(tag); el.textContent = value; if (className) el.className = className; return el; }
@@ -35,7 +36,8 @@ async function refreshInfo() {
   return info;
 }
 async function removeSource(id, button) {
-  generation++; previewVersion++; stop(); button.disabled = true;
+  if (queryController) queryController.abort(); queryController = null;
+  generation++; previewVersion++; stop(); $("run").disabled = false; $("cancel-query").hidden = true; button.disabled = true;
   try {
     await api("/api/source/" + id, null, "DELETE"); const info = await refreshInfo();
     if (info.sources.length) await runQuery();
@@ -48,8 +50,8 @@ async function removeSource(id, button) {
   } catch (error) { button.disabled = false; message(error.message, "error"); }
 }
 function stop() { playing = false; playbackVersion++; $("play").textContent = "▶ Play selection"; }
-function updateQueue() {
-  stop(); const unique = new Map();
+function updateQueue(stopPlayback = true) {
+  if (stopPlayback) stop(); const unique = new Map();
   result.rows.forEach((row, index) => { if (selection.has(index)) for (const f of frameValues(row)) unique.set(f.id, f); });
   queue = [...unique.values()];
   if ($("order").value === "presentation") {
@@ -71,7 +73,7 @@ function renderTable() {
   const hasFrames = result.rows.some(row => frameValues(row).length);
   const hr = document.createElement("tr");
   if (hasFrames) {
-    const th = document.createElement("th"), all = document.createElement("input"); all.type = "checkbox"; all.checked = true; all.setAttribute("aria-label", "Select all frame rows");
+    const th = document.createElement("th"), all = document.createElement("input"); all.type = "checkbox"; all.checked = selection.size === result.rows.filter(row => frameValues(row).length).length; all.indeterminate = selection.size > 0 && !all.checked; all.setAttribute("aria-label", "Select all frame rows");
     all.addEventListener("change", () => {
       selection.clear(); if (all.checked) result.rows.forEach((row, i) => { if (frameValues(row).length) selection.add(i); });
       body.querySelectorAll("input[type=checkbox]").forEach(c => { c.checked = selection.has(Number(c.dataset.row)); }); updateQueue();
@@ -108,34 +110,78 @@ function loadImage(frame) {
   images.set(frame.id, promise); if (images.size > 8) images.delete(images.keys().next().value);
   promise.catch(() => images.delete(frame.id)); return promise;
 }
-async function show(frame) {
+async function show(frame, quiet = false) {
   const version = ++previewVersion;
   $("download").href = frame.raw_url; $("download").hidden = false;
   $("frame-title").textContent = `${frame.source} · Frame ${frame.sample_index}`;
   $("frame-detail").textContent = `Track ${frame.track_id} · PTS ${frame.pts_seconds.toFixed(6)} s · ${frame.size.toLocaleString()} bytes`;
   $("results").querySelectorAll("tbody tr").forEach(tr => tr.classList.toggle("active", frameValues(result.rows[Number(tr.dataset.row)]).some(f => f.id === frame.id)));
   if (!decoderAvailable) return;
-  if (!ready.has(frame.id)) { message(`Rendering frame ${frame.sample_index}…`, "busy"); await prepare([frame]); }
+  if (!ready.has(frame.id)) { if (!quiet) message(`Rendering frame ${frame.sample_index}…`, "busy"); await prepare([frame]); }
   const img = await loadImage(frame); if (version !== previewVersion) return;
   $("preview").src = img.src; $("preview").hidden = false; $("preview-empty").hidden = true;
   $("frame-badge").textContent = `PTS ${frame.pts_seconds.toFixed(3)} s`; $("frame-badge").hidden = false;
-  if (!playing) message("Frame ready. Select rows to create a playback sequence.");
+  if (!playing && !quiet) message("Frame ready. Select rows to create a playback sequence.");
+}
+async function readQueryStream(sql, signal, receive) {
+  const response = await fetch("/api/query/stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sql }), signal });
+  if (!response.ok) { const data = await response.json(); throw new Error(data.error || "Query failed"); }
+  if (!response.body) throw new Error("Streaming responses are unavailable in this browser");
+  const reader = response.body.getReader(), decoder = new TextDecoder(); let pending = "", completed = false;
+  const line = value => {
+    if (!value.trim()) return;
+    const event = JSON.parse(value);
+    if (event.type === "error") throw new Error(event.error || "Query failed");
+    if (event.type === "done") completed = true;
+    receive(event);
+  };
+  try {
+    while (true) {
+      const { value, done } = await reader.read(); pending += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      let newline; while ((newline = pending.indexOf("\n")) >= 0) { line(pending.slice(0, newline)); pending = pending.slice(newline + 1); }
+      if (done) break;
+    }
+    line(pending); if (!completed) throw new Error("Query stream ended before completion");
+  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 async function runQuery() {
-  const version = ++generation; previewVersion++; stop(); $("run").disabled = true; message("Running query…", "busy");
+  if (queryController) queryController.abort();
+  const controller = new AbortController(); queryController = controller;
+  const version = ++generation, started = performance.now(); let firstRow = null;
+  previewVersion++; stop(); $("run").disabled = true; $("cancel-query").hidden = false; message("Running query…", "busy");
+  result = { columns: [], rows: [] }; selection.clear(); renderTable(); updateQueue();
   $("preview").hidden = true; $("preview-empty").hidden = false; $("frame-badge").hidden = true; $("download").hidden = true;
   $("frame-title").textContent = "No frame selected"; $("frame-detail").textContent = "Binary frame + decoded preview";
+  const timing = () => firstRow == null ? "" : ` · first row in ${(firstRow / 1000).toFixed(2)} s`;
   try {
-    const data = await api("/api/query", { sql: $("sql").value }); if (version !== generation) return;
-    await refreshInfo();
-    result = data; selection.clear(); result.rows.forEach((r, i) => { if (frameValues(r).length) selection.add(i); }); position = 0;
-    renderTable(); updateQueue();
-    $("result-note").textContent = data.truncated ? "Showing 500 rows. Add LIMIT or narrow WHERE." : queue.length ? "Select rows for playback · click a frame to inspect" : "Scalar query results";
-    message(`${result.rows.length} rows returned${data.truncated ? " · result capped at 500 rows" : ""}.`);
-    if (queue.length) await show(queue[0]);
-  } catch (error) { if (version === generation) message(error.message, "error"); }
-  finally { if (version === generation) $("run").disabled = false; }
+    await readQueryStream($("sql").value, controller.signal, event => {
+      if (version !== generation) return;
+      if (event.type === "schema") {
+        result.columns = event.columns; renderTable(); $("result-note").textContent = "Preparing query input…";
+      } else if (event.type === "rows") {
+        const first = result.rows.length === 0;
+        for (const row of event.rows) { const index = result.rows.length; result.rows.push(row); if (frameValues(row).length) selection.add(index); }
+        if (firstRow == null && event.rows.length) firstRow = performance.now() - started;
+        renderTable(); updateQueue(false); $("result-note").textContent = "Receiving rows…";
+        message(`${result.rows.length} rows received${timing()}…`, "busy");
+        if (first && queue.length) show(queue[0], true).catch(error => { if (version === generation) message(`Preview: ${error.message}`, "error"); });
+      } else if (event.type === "done") {
+        $("result-note").textContent = event.truncated ? "Showing 500 rows. Add LIMIT or narrow WHERE." : queue.length ? "Select rows for playback · click a frame to inspect" : "Scalar query results";
+        message(`${result.rows.length} rows returned${timing()}${event.truncated ? " · result capped at 500 rows" : ""}.`);
+      }
+    });
+    if (version === generation) await refreshInfo().catch(() => {});
+  } catch (error) {
+    if (version === generation) {
+      const canceled = controller.signal.aborted;
+      $("result-note").textContent = `${canceled ? "Canceled" : "Incomplete query"} · ${result.rows.length} rows received`;
+      message(canceled ? `Query canceled. ${result.rows.length} received rows remain available.` : `${error.message} (${result.rows.length} rows received; result incomplete)`, canceled ? "" : "error");
+    }
+  } finally {
+    if (version === generation) { $("run").disabled = false; $("cancel-query").hidden = true; queryController = null; }
+  }
 }
+
 async function play() {
   if (playing) { stop(); return; } if (!queue.length) return;
   const version = ++playbackVersion; playing = true; $("play").textContent = "Ⅱ Pause";
@@ -159,6 +205,7 @@ async function play() {
 }
 function move(next) { stop(); if (!queue.length) return; position = Math.max(0, Math.min(queue.length - 1, next)); updatePosition(); show(queue[position]).catch(e => message(e.message, "error")); }
 $("run").addEventListener("click", runQuery);
+$("cancel-query").addEventListener("click", () => { if (queryController) queryController.abort(); });
 $("sql").addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); runQuery(); } });
 document.querySelectorAll("[data-example]").forEach(button => button.addEventListener("click", () => { $("sql").value = examples[button.dataset.example]; $("sql").style.height = Math.max(130, $("sql").value.split("\n").length * 25 + 32) + "px"; $("sql").focus(); }));
 $("play").addEventListener("click", play); $("previous").addEventListener("click", () => move(position - 1)); $("next").addEventListener("click", () => move(position + 1)); $("scrub").addEventListener("input", () => move(Number($("scrub").value)));

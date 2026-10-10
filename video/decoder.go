@@ -97,33 +97,11 @@ func (r *Decoder) Prepare(ctx context.Context, src Source, track uint32, frames 
 	key := fmt.Sprintf("%s-%d", src.Key, track)
 	index := r.indices[key]
 	if index == nil {
-		// pkt_pos maps decoded pictures to exact source samples, including B
-		// frames. A nearest-timestamp seek cannot provide this guarantee.
-		data, err := command(ctx, r.ffprobe, "-v", "error", "-ignore_editlist", "1", "-select_streams", fmt.Sprintf("i:%d", track), "-show_frames", "-show_entries", "frame=pkt_pos", "-of", "json", src.Path)
-		if err != nil {
-			return err
-		}
-		var result struct {
-			Frames []struct {
-				Position string `json:"pkt_pos"`
-			} `json:"frames"`
-		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			return err
-		}
 		index = map[int64]int{}
-		for i, frame := range result.Frames {
-			position, err := strconv.ParseInt(frame.Position, 10, 64)
-			if err != nil {
-				continue
-			}
-			if _, exists := index[position]; exists {
-				index[position] = -1
-			} else {
-				index[position] = i
-			}
-		}
 		r.indices[key] = index
+	}
+	if err := r.indexSamples(ctx, src, track, pending, index); err != nil {
+		return err
 	}
 	type selection struct {
 		id      string
@@ -169,4 +147,99 @@ func (r *Decoder) Prepare(ctx context.Context, src Source, track uint32, frames 
 		}
 	}
 	return nil
+}
+
+// indexSamples reads FFprobe's JSON incrementally and terminates decoding as
+// soon as every requested byte position is mapped. Later requests extend the
+// cached prefix. pkt_pos retains exact B-frame identity, unlike timestamp seeks.
+func (r *Decoder) indexSamples(ctx context.Context, src Source, track uint32, frames map[string]format.Frame, index map[int64]int) error {
+	wanted := map[int64]bool{}
+	for _, f := range frames {
+		if _, ok := index[f.Offset]; !ok {
+			wanted[f.Offset] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	probeCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	cmd := exec.CommandContext(probeCtx, r.ffprobe, "-v", "error", "-ignore_editlist", "1", "-select_streams", fmt.Sprintf("i:%d", track), "-show_frames", "-show_entries", "frame=pkt_pos", "-of", "json", src.Path)
+	stderr := &boundedBuffer{limit: 1 << 20}
+	cmd.Stderr = stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	decodeErr := readSampleIndex(ctx, json.NewDecoder(stdout), wanted, index)
+	// Reap the process on every path, including early success and cancellation.
+	stop()
+	stdout.Close()
+	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if decodeErr != nil {
+		return fmt.Errorf("frame indexing failed: %w %s", decodeErr, strings.TrimSpace(stderr.String()))
+	}
+	if len(wanted) != 0 {
+		return fmt.Errorf("requested samples not found in decoded track: %v %s", waitErr, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+func readSampleIndex(ctx context.Context, decoder *json.Decoder, wanted map[int64]bool, index map[int64]int) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('{') {
+		return fmt.Errorf("expected frame index object")
+	}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if key != "frames" {
+			var skip json.RawMessage
+			if err := decoder.Decode(&skip); err != nil {
+				return err
+			}
+			continue
+		}
+		if token, err := decoder.Token(); err != nil || token != json.Delim('[') {
+			return fmt.Errorf("expected frames array: %v", err)
+		}
+		ordinal := 0
+		for decoder.More() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			var frame struct {
+				Position string `json:"pkt_pos"`
+			}
+			if err := decoder.Decode(&frame); err != nil {
+				return err
+			}
+			position, err := strconv.ParseInt(frame.Position, 10, 64)
+			if err == nil {
+				if previous, exists := index[position]; exists && previous != ordinal {
+					index[position] = -1
+				} else {
+					index[position] = ordinal
+				}
+				delete(wanted, position)
+			}
+			ordinal++
+			if len(wanted) == 0 {
+				return nil
+			}
+		}
+		return fmt.Errorf("requested samples not found in decoded track")
+	}
+	return fmt.Errorf("missing frames array")
 }

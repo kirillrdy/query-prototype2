@@ -68,6 +68,7 @@ func New(ctx context.Context, paths []string) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/info", s.info)
 	mux.HandleFunc("POST /api/query", s.query)
+	mux.HandleFunc("POST /api/query/stream", s.queryStream)
 	mux.HandleFunc("POST /api/upload", s.upload)
 	mux.HandleFunc("POST /api/source", s.openSource)
 	mux.HandleFunc("DELETE /api/source/{id}", s.removeSource)
@@ -197,7 +198,9 @@ func (s *Server) removeSource(w http.ResponseWriter, r *http.Request) {
 	fail(w, 404, fmt.Errorf("unknown source"))
 }
 
-func (s *Server) query(w http.ResponseWriter, r *http.Request) {
+func (s *Server) query(w http.ResponseWriter, r *http.Request)       { s.executeQuery(w, r, false) }
+func (s *Server) queryStream(w http.ResponseWriter, r *http.Request) { s.executeQuery(w, r, true) }
+func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request, streaming bool) {
 	var request struct {
 		SQL string `json:"sql"`
 	}
@@ -238,6 +241,10 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 		tables[tableName] = format.Append(tables[tableName], t)
 	}
 	functions := engine.Functions{"motion": video.Motion(s.renderer.decoder, s.resolveFrame)}
+	if streaming {
+		s.streamQuery(ctx, w, q.WithMaxRows(maxResultRows+1), tables, functions)
+		return
+	}
 	result, err := q.WithMaxRows(maxResultRows+1).ExecuteWith(ctx, tables, functions)
 	if err != nil {
 		fail(w, 400, err)
@@ -503,4 +510,48 @@ func (s *Server) openSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"loaded": true})
+}
+
+// NDJSON carries complete rows, so an error after output leaves an explicit
+// partial result rather than silently turning an unfinished query into success.
+func (s *Server) streamQuery(ctx context.Context, w http.ResponseWriter, q engine.Query, tables map[string]format.Table, functions engine.Functions) {
+	started, received := false, 0
+	encoder := json.NewEncoder(w)
+	controller := http.NewResponseController(w)
+	send := func(event any) error {
+		if !started {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("X-Accel-Buffering", "no")
+			started = true
+		}
+		if err := encoder.Encode(event); err != nil {
+			return err
+		}
+		return controller.Flush()
+	}
+	err := q.Stream(ctx, tables, functions, func(chunk engine.Result) error {
+		if chunk.Rows == nil {
+			return send(map[string]any{"type": "schema", "columns": chunk.Columns})
+		}
+		rows := chunk.Rows
+		remaining := maxResultRows - received
+		received += len(rows)
+		if remaining <= 0 {
+			return nil
+		}
+		if len(rows) > remaining {
+			rows = rows[:remaining]
+		}
+		return send(map[string]any{"type": "rows", "rows": rows})
+	})
+	if err != nil {
+		if !started {
+			fail(w, 400, err)
+		} else if ctx.Err() != context.Canceled {
+			send(map[string]any{"type": "error", "error": err.Error()})
+		}
+		return
+	}
+	send(map[string]any{"type": "done", "truncated": received > maxResultRows})
 }

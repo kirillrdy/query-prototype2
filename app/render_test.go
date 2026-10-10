@@ -154,6 +154,43 @@ func TestRenderedSelectionMatchesPicturesAndRawBytes(t *testing.T) {
 		}
 		previous = current
 	}
+	cold := newTestServer(t, path)
+	streamed := request(cold, "POST", "/api/query/stream", []byte(`{"sql":"SELECT frame, motion(frame, LAG(frame) OVER (PARTITION BY path, track_id ORDER BY pts_seconds, sample_index)) AS motion_score FROM frames WHERE sample_index >= 2 AND sample_index <= 5 ORDER BY pts_seconds"}`))
+	if streamed.Code != 200 {
+		t.Fatal(streamed.Body.String())
+	}
+	streamDecoder := json.NewDecoder(streamed.Body)
+	var scores []*float64
+	for {
+		var event struct {
+			Type string
+			Rows []struct {
+				Score *float64 `json:"motion_score"`
+			}
+			Error string
+		}
+		if err := streamDecoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == "error" {
+			t.Fatal(event.Error)
+		}
+		for _, row := range event.Rows {
+			scores = append(scores, row.Score)
+		}
+		if event.Type == "done" {
+			break
+		}
+	}
+	if len(scores) != len(motionResult.Rows) {
+		t.Fatal("stream row count differs")
+	}
+	for i, score := range scores {
+		want := motionResult.Rows[i].Score
+		if (score == nil) != (want == nil) || (score != nil && *score != *want) {
+			t.Fatalf("stream row %d motion differs from full grayscale decode", i)
+		}
+	}
 	w = request(s, "POST", "/api/query", []byte(`{"sql":"SELECT motion(frame, frame) AS zero FROM frames LIMIT 2"}`))
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
