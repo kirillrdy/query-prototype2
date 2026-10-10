@@ -61,7 +61,7 @@ func command(ctx context.Context, program string, args ...string) ([]byte, error
 }
 
 func (r *Decoder) Prepare(ctx context.Context, src Source, track uint32, frames map[string]format.Frame, representation Representation) error {
-	suffix, filterSuffix, codecArgs, err := representation.options()
+	suffix, _, _, err := representation.options()
 	if err != nil {
 		return err
 	}
@@ -94,13 +94,69 @@ func (r *Decoder) Prepare(ctx context.Context, src Source, track uint32, frames 
 	if len(pending) == 0 {
 		return nil
 	}
+	// Keyframe-only batches can skip all inter-frame decoding. Other batches
+	// are divided at sync samples so sparse selections never decode long gaps.
+	keyframes := true
+	for _, f := range pending {
+		keyframes = keyframes && f.Seekable && f.Keyframe
+	}
+	groups := map[float64]map[string]format.Frame{}
+	if keyframes {
+		start := -1.0
+		for _, f := range pending {
+			if start < 0 || f.DecodeStart < start {
+				start = f.DecodeStart
+			}
+		}
+		groups[seekStart(start)] = pending
+	} else {
+		for id, f := range pending {
+			start := 0.0
+			if f.Seekable {
+				start = seekStart(f.DecodeStart)
+			}
+			if groups[start] == nil {
+				groups[start] = map[string]format.Frame{}
+			}
+			groups[start][id] = f
+		}
+	}
+	starts := make([]float64, 0, len(groups))
+	for start := range groups {
+		starts = append(starts, start)
+	}
+	sort.Float64s(starts)
+	for _, start := range starts {
+		if err := r.prepareGroup(ctx, src, track, groups[start], representation, start, keyframes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func seekStart(anchor float64) float64 {
+	// Seek just before the sync timestamp to avoid rounding past that sample.
+	if anchor <= 0.000001 {
+		return 0
+	}
+	return anchor - 0.000001
+}
+
+func (r *Decoder) prepareGroup(ctx context.Context, src Source, track uint32, pending map[string]format.Frame, representation Representation, start float64, keyframes bool) error {
+	suffix, filterSuffix, codecArgs, err := representation.options()
+	if err != nil {
+		return err
+	}
 	key := fmt.Sprintf("%s-%d", src.Key, track)
+	if start != 0 || keyframes {
+		key += fmt.Sprintf("-%s-%t", strconv.FormatFloat(start, 'f', 6, 64), keyframes)
+	}
 	index := r.indices[key]
 	if index == nil {
 		index = map[int64]int{}
 		r.indices[key] = index
 	}
-	if err := r.indexSamples(ctx, src, track, pending, index); err != nil {
+	if err := r.indexSamples(ctx, src, track, pending, index, start, keyframes); err != nil {
 		return err
 	}
 	type selection struct {
@@ -126,7 +182,14 @@ func (r *Decoder) Prepare(ctx context.Context, src Source, track uint32, frames 
 	}
 	defer os.RemoveAll(staging)
 	filter := "select=" + selectExpression(ordinals) + filterSuffix
-	args := []string{"-v", "error", "-nostdin", "-ignore_editlist", "1", "-i", src.Path, "-map", fmt.Sprintf("0:i:%d", track), "-an", "-vf", filter, "-fps_mode", "vfr", "-frames:v", strconv.Itoa(len(selected))}
+	args := []string{"-v", "error", "-nostdin", "-ignore_editlist", "1"}
+	if start > 0 {
+		args = append(args, "-ss", strconv.FormatFloat(start, 'f', 6, 64), "-seek_timestamp", "1", "-noaccurate_seek")
+	}
+	if keyframes {
+		args = append(args, "-skip_frame", "nokey")
+	}
+	args = append(args, "-i", src.Path, "-map", fmt.Sprintf("0:i:%d", track), "-an", "-vf", filter, "-fps_mode", "vfr", "-frames:v", strconv.Itoa(len(selected)))
 	args = append(args, codecArgs...)
 	args = append(args, filepath.Join(staging, "%06d"+suffix))
 	_, err = command(ctx, r.ffmpeg, args...)
@@ -150,9 +213,9 @@ func (r *Decoder) Prepare(ctx context.Context, src Source, track uint32, frames 
 }
 
 // indexSamples reads FFprobe's JSON incrementally and terminates decoding as
-// soon as every requested byte position is mapped. Later requests extend the
-// cached prefix. pkt_pos retains exact B-frame identity, unlike timestamp seeks.
-func (r *Decoder) indexSamples(ctx context.Context, src Source, track uint32, frames map[string]format.Frame, index map[int64]int) error {
+// soon as every requested byte position is mapped. The index is local to the
+// same seek/skip settings used by FFmpeg; pkt_pos verifies exact sample identity.
+func (r *Decoder) indexSamples(ctx context.Context, src Source, track uint32, frames map[string]format.Frame, index map[int64]int, start float64, keyframes bool) error {
 	wanted := map[int64]bool{}
 	for _, f := range frames {
 		if _, ok := index[f.Offset]; !ok {
@@ -164,7 +227,15 @@ func (r *Decoder) indexSamples(ctx context.Context, src Source, track uint32, fr
 	}
 	probeCtx, stop := context.WithCancel(ctx)
 	defer stop()
-	cmd := exec.CommandContext(probeCtx, r.ffprobe, "-v", "error", "-ignore_editlist", "1", "-select_streams", fmt.Sprintf("i:%d", track), "-show_frames", "-show_entries", "frame=pkt_pos", "-of", "json", src.Path)
+	args := []string{"-v", "error", "-ignore_editlist", "1"}
+	if start > 0 {
+		args = append(args, "-read_intervals", strconv.FormatFloat(start, 'f', 6, 64)+"%")
+	}
+	if keyframes {
+		args = append(args, "-skip_frame", "nokey")
+	}
+	args = append(args, "-select_streams", fmt.Sprintf("i:%d", track), "-show_frames", "-show_entries", "frame=pkt_pos", "-of", "json", src.Path)
+	cmd := exec.CommandContext(probeCtx, r.ffprobe, args...)
 	stderr := &boundedBuffer{limit: 1 << 20}
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()
@@ -183,7 +254,7 @@ func (r *Decoder) indexSamples(ctx context.Context, src Source, track uint32, fr
 		return ctx.Err()
 	}
 	if decodeErr != nil {
-		return fmt.Errorf("frame indexing failed: %w %s", decodeErr, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("frame indexing failed at %.6fs (%d samples missing): %w %s", start, len(wanted), decodeErr, strings.TrimSpace(stderr.String()))
 	}
 	if len(wanted) != 0 {
 		return fmt.Errorf("requested samples not found in decoded track: %v %s", waitErr, strings.TrimSpace(stderr.String()))

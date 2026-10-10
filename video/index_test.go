@@ -1,6 +1,7 @@
 package video
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -35,12 +37,12 @@ func TestSampleIndexStopsAtRequestedPrefixAndExtends(t *testing.T) {
 	}
 }
 
-func TestDecoderBuildsAndExtendsOnlyRequestedPrefix(t *testing.T) {
+func TestDecoderSeeksToSamplesAndSkipsInterFrames(t *testing.T) {
 	decoder := NewDecoder(t.TempDir())
 	if !decoder.Available() {
 		t.Skip("ffmpeg/ffprobe unavailable")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	path := filepath.Join(t.TempDir(), "video.mp4")
 	if output, err := exec.CommandContext(ctx, decoder.ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=32x32:rate=25", "-frames:v", "120", "-c:v", "mpeg4", "-bf", "2", path).CombinedOutput(); err != nil {
@@ -61,18 +63,42 @@ func TestDecoderBuildsAndExtendsOnlyRequestedPrefix(t *testing.T) {
 	}
 	frames := tables["frames"]
 	src := Source{Key: "test", Path: path, Size: stat.Size(), Modified: stat.ModTime()}
-	first := 0
-	for _, row := range []int{4, 40} {
+	// An independent full decode provides exact pixels in presentation order.
+	baseline := filepath.Join(t.TempDir(), "baseline.gray")
+	if output, err := exec.CommandContext(ctx, decoder.ffmpeg, "-v", "error", "-ignore_editlist", "1", "-i", path, "-an", "-vf", "scale=160:90,format=gray", "-fps_mode", "vfr", "-c:v", "rawvideo", "-pix_fmt", "gray", "-f", "rawvideo", baseline).CombinedOutput(); err != nil {
+		t.Fatalf("%s: %v", output, err)
+	}
+	pixels, err := os.ReadFile(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordered := make([]format.Frame, frames.Len())
+	for i := range ordered {
+		ordered[i] = frames.Value(i, "frame").(format.Frame)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].PTS < ordered[j].PTS })
+	ordinals := map[int]int{}
+	for i, f := range ordered {
+		ordinals[f.SampleIndex] = i
+	}
+	check := func(id string, f format.Frame) {
+		t.Helper()
+		actual, err := os.ReadFile(decoder.Path(id, Gray))
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := ordinals[f.SampleIndex] * GrayWidth * GrayHeight
+		if !bytes.Equal(actual, pixels[start:start+GrayWidth*GrayHeight]) {
+			t.Fatalf("sample %d rendered the wrong picture after seeking", f.SampleIndex)
+		}
+	}
+	for _, row := range []int{4, 40, 119} {
 		frame := frames.Value(row, "frame").(format.Frame)
 		id := fmt.Sprintf("sample-%d", row)
 		if err := decoder.Prepare(ctx, src, frame.TrackID, map[string]format.Frame{id: frame}, Gray); err != nil {
 			t.Fatal(err)
 		}
-		count := len(decoder.indices[fmt.Sprintf("test-%d", frame.TrackID)])
-		if count <= first || count >= frames.Len() {
-			t.Fatalf("requested sample %d indexed %d of %d frames (previous %d)", row+1, count, frames.Len(), first)
-		}
-		first = count
+		check(id, frame)
 		// A cached representation should require no new indexing subprocess.
 		probe := decoder.ffprobe
 		decoder.ffprobe = "missing-probe-command"
@@ -80,5 +106,30 @@ func TestDecoderBuildsAndExtendsOnlyRequestedPrefix(t *testing.T) {
 			t.Fatal(err)
 		}
 		decoder.ffprobe = probe
+	}
+	for key, index := range decoder.indices {
+		if len(index) > 30 {
+			t.Fatalf("seek %s indexed %d frames instead of a bounded GOP", key, len(index))
+		}
+	}
+	// A cold batch of late keyframes must index keyframes only, not the prefix.
+	decoder = NewDecoder(t.TempDir())
+	selected := map[string]format.Frame{}
+	for i := 60; i < frames.Len(); i++ {
+		f := frames.Value(i, "frame").(format.Frame)
+		if f.Keyframe {
+			selected[fmt.Sprintf("key-%d", i)] = f
+		}
+	}
+	if err := decoder.Prepare(ctx, src, 1, selected, Gray); err != nil {
+		t.Fatal(err)
+	}
+	for id, f := range selected {
+		check(id, f)
+	}
+	for key, index := range decoder.indices {
+		if len(index) > len(selected)+1 {
+			t.Fatalf("keyframe seek %s indexed %d frames for %d keys", key, len(index), len(selected))
+		}
 	}
 }

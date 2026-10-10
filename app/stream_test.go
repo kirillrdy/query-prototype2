@@ -64,14 +64,14 @@ func TestStreamFlushesFirstRowBeforeRemainingWorkAndCancels(t *testing.T) {
 	}
 }
 
-func TestStreamProtocolCapAndPartialErrors(t *testing.T) {
+func TestStreamProtocolUncappedAndPartialErrors(t *testing.T) {
 	s := newTestServer(t, emptyMovie(t))
-	// Exercise the actual route, schema, cap, and completion protocol.
+	// Exercise the actual route beyond the former 500-row cap.
 	table, err := s.sources[0].loadTable(context.Background(), "files")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < maxResultRows+10; i++ {
+	for i := 0; i < 1200; i++ {
 		table.Rows = append(table.Rows, format.Row{"path": "sample"})
 	}
 	s.sources[0].tables["files"] = table
@@ -88,7 +88,7 @@ func TestStreamProtocolCapAndPartialErrors(t *testing.T) {
 		}
 		count += len(event.Rows)
 		if event.Type == "done" {
-			if count != maxResultRows || !event.Truncated {
+			if count != table.Len() || event.Truncated {
 				t.Fatalf("count=%d truncated=%v", count, event.Truncated)
 			}
 			break

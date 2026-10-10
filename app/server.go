@@ -27,8 +27,6 @@ import (
 //go:embed static/*
 var static embed.FS
 
-const maxResultRows = 500
-
 type FrameValue struct {
 	format.Frame
 	ID         string `json:"id"`
@@ -178,7 +176,7 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	for name, t := range mp4.Schemas() {
 		schemas[name] = t.Columns
 	}
-	writeJSON(w, map[string]any{"sources": items, "schemas": schemas, "decoder_available": s.renderer.available(), "max_rows": maxResultRows})
+	writeJSON(w, map[string]any{"sources": items, "schemas": schemas, "decoder_available": s.renderer.available()})
 }
 
 func (s *Server) removeSource(w http.ResponseWriter, r *http.Request) {
@@ -242,22 +240,18 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request, streaming 
 	}
 	functions := engine.Functions{"motion": video.Motion(s.renderer.decoder, s.resolveFrame)}
 	if streaming {
-		s.streamQuery(ctx, w, q.WithMaxRows(maxResultRows+1), tables, functions)
+		s.streamQuery(ctx, w, q, tables, functions)
 		return
 	}
-	result, err := q.WithMaxRows(maxResultRows+1).ExecuteWith(ctx, tables, functions)
+	result, err := q.ExecuteWith(ctx, tables, functions)
 	if err != nil {
 		fail(w, 400, err)
 		return
 	}
-	truncated := len(result.Rows) > maxResultRows
-	if truncated {
-		result.Rows = result.Rows[:maxResultRows]
-	}
 	writeJSON(w, struct {
 		engine.Result
 		Truncated bool `json:"truncated"`
-	}{result, truncated})
+	}{result, false})
 }
 
 func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
@@ -353,8 +347,8 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
-	if len(request.IDs) == 0 || len(request.IDs) > maxResultRows {
-		fail(w, 400, fmt.Errorf("select between 1 and %d frames", maxResultRows))
+	if len(request.IDs) == 0 || len(request.IDs) > video.MaxFrames {
+		fail(w, 400, fmt.Errorf("select between 1 and %d frames per render batch", video.MaxFrames))
 		return
 	}
 	groups := map[*source]map[uint32]map[string]format.Frame{}
@@ -515,7 +509,7 @@ func (s *Server) openSource(w http.ResponseWriter, r *http.Request) {
 // NDJSON carries complete rows, so an error after output leaves an explicit
 // partial result rather than silently turning an unfinished query into success.
 func (s *Server) streamQuery(ctx context.Context, w http.ResponseWriter, q engine.Query, tables map[string]format.Table, functions engine.Functions) {
-	started, received := false, 0
+	started := false
 	encoder := json.NewEncoder(w)
 	controller := http.NewResponseController(w)
 	send := func(event any) error {
@@ -534,16 +528,7 @@ func (s *Server) streamQuery(ctx context.Context, w http.ResponseWriter, q engin
 		if chunk.Rows == nil {
 			return send(map[string]any{"type": "schema", "columns": chunk.Columns})
 		}
-		rows := chunk.Rows
-		remaining := maxResultRows - received
-		received += len(rows)
-		if remaining <= 0 {
-			return nil
-		}
-		if len(rows) > remaining {
-			rows = rows[:remaining]
-		}
-		return send(map[string]any{"type": "rows", "rows": rows})
+		return send(map[string]any{"type": "rows", "rows": chunk.Rows})
 	})
 	if err != nil {
 		if !started {
@@ -553,5 +538,5 @@ func (s *Server) streamQuery(ctx context.Context, w http.ResponseWriter, q engin
 		}
 		return
 	}
-	send(map[string]any{"type": "done", "truncated": received > maxResultRows})
+	send(map[string]any{"type": "done", "truncated": false})
 }

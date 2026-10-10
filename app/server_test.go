@@ -136,13 +136,13 @@ func TestRawBinaryDownloadAndSourceChanges(t *testing.T) {
 	}
 }
 
-func TestResultCapAndNoDecoder(t *testing.T) {
+func TestUncappedResultsAndNoDecoder(t *testing.T) {
 	s := newTestServer(t, emptyMovie(t))
 	table, err := s.sources[0].loadTable(context.Background(), "files")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < maxResultRows+10; i++ {
+	for i := 0; i < 1200; i++ {
 		table.Rows = append(table.Rows, format.Row{"path": "sample"})
 	}
 	s.sources[0].tables["files"] = table
@@ -154,8 +154,8 @@ func TestResultCapAndNoDecoder(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Rows) != maxResultRows || !result.Truncated {
-		t.Fatalf("cap: %d %v", len(result.Rows), result.Truncated)
+	if len(result.Rows) != table.Len() || result.Truncated {
+		t.Fatalf("rows: %d truncated=%v", len(result.Rows), result.Truncated)
 	}
 	s.renderer.decoder = &video.Decoder{}
 	if err := s.renderer.prepare(context.Background(), s.sources[0], 1, nil); err == nil {

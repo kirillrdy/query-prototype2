@@ -37,6 +37,17 @@ func TestMultiFileLimitAndAtomicOutput(t *testing.T) {
 		t.Fatalf("global limit: %v", result)
 	}
 	out.Reset()
+	paged := append([]string{"-query", "SELECT path FROM files LIMIT 1 OFFSET 1"}, paths...)
+	if err := run(context.Background(), paged, &out, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 || result.Rows[0]["path"] != paths[1] {
+		t.Fatalf("global offset: %+v", result)
+	}
+	out.Reset()
 	args = append(args, filepath.Join(t.TempDir(), "missing.mp4"))
 	if err := run(context.Background(), args, &out, &stderr); err == nil {
 		t.Fatal("expected missing input error")

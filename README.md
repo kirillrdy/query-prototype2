@@ -53,9 +53,10 @@ Previews require `ffmpeg` and `ffprobe` on PATH. Metadata queries and binary
 downloads work without them. FFprobe maps decoded pictures to exact sample byte
 positions, so B-frames are identified correctly; FFmpeg then decodes the source
 with its required reference pictures and exports only the selected pictures.
-The decoder indexes only the prefix needed to identify the requested samples,
-and stops as soon as those samples are mapped. Later requests extend this cache.
-Selections late in a movie still require decoding their preceding frames.
+The decoder seeks near the requested samples using the container's sync-sample
+index, then maps exact byte positions in that local decode. Sparse inter-frame
+selections decode nearby reference groups; keyframe-only batches skip inter-frame
+decoding entirely. Indexing stops as soon as the requested samples are mapped.
 Preview images are cached JPEGs, scaled to fit 1280 × 720 without enlarging.
 The downloaded `.bin` is an encoded sample, which may require codec headers and
 other frames to decode; it is not a standalone video file.
@@ -63,9 +64,8 @@ other frames to decode; it is not a standalone video file.
 The server binds to localhost only; use `-port 8090` to choose another port.
 The workbench streams complete rows as they become available, displays first-row
 latency, and provides **Cancel query**. Received rows remain available if canceled
-or interrupted, with an explicit incomplete-result notice. Queries are capped
-at 500 result rows in the UI, with a visible truncation note;
-the CLI has no UI row cap. The session accepts up to 16 files. Uploads stream
+or interrupted, with an explicit incomplete-result notice. Results have no row
+cap; use SQL `LIMIT` and `OFFSET` to select a page. The session accepts up to 16 files. Uploads stream
 to disk with no fixed size limit; use a local path for large files to avoid
 copying the entire video. Uploads and preview caches live in a temporary
 directory and are deleted when the app exits normally. A removed source's
@@ -109,8 +109,8 @@ without ordering, rows follow their input order. Equal order keys retain input
 order; include `sample_index` to make presentation-time ordering explicit.
 Window ordering does not itself reorder the final results.
 
-`WHERE` filters **before** window evaluation, and the final `LIMIT` applies
-**after** window evaluation. To keep the preceding frame from outside a time
+`WHERE` filters **before** window evaluation. Final ordering, `OFFSET`, and
+`LIMIT` apply **after** window evaluation; skipped rows remain available to LAG. To keep the preceding frame from outside a time
 range, compute the window in a subquery and filter outside it. This also lets
 you use the name `previous_frame` as an argument:
 
@@ -152,7 +152,7 @@ motion/LAG partition can be emitted with a null score before any decoding.
 
 The web UI uses `POST /api/query/stream` with a JSON `{"sql": "..."}` body.
 Its `application/x-ndjson` response contains `schema` (columns), `rows` (complete
-row batches), then `done` (truncation flag), or `error` after a partial result.
+row batches), then `done` (completion), or `error` after a partial result.
 Each event is flushed immediately. `POST /api/query` retains the original
 complete JSON response for other clients.
 
@@ -208,15 +208,36 @@ values. In the web API, frame values also include opaque IDs and preview/raw URL
 ```text
 SELECT * | expression [AS alias] [, expression [AS alias] ...]
 FROM table | (SELECT ...) AS alias
-[WHERE expression operator expression [AND ...]]
+[WHERE predicate [AND ...]]
 [ORDER BY column_or_alias [ASC | DESC] [NULLS FIRST | LAST] [, ...]]
 [LIMIT nonnegative_integer]
+[OFFSET nonnegative_integer]
+
+predicate := expression operator expression
+           | expression [NOT] BETWEEN lower_expression AND upper_expression
+           | expression IS [NOT] NULL
 ```
 
 Keywords and identifiers are case insensitive. Operators: `=`, `!=`, `<>`, `<`,
-`<=`, `>`, `>=`; `IS NULL` and `IS NOT NULL` are also supported. Literals are
+`<=`, `>`, `>=`; `IS NULL`, `IS NOT NULL`, `BETWEEN`, and `NOT BETWEEN` are also supported.
+`BETWEEN` includes both endpoints; its internal AND is part of the range, so
+additional predicates may follow another AND. Bounds can be literals, columns,
+or scalar function expressions. Null comparisons retain SQL unknown semantics.
+`OFFSET n` skips n rows after filtering and ordering, before LIMIT and projection.
+It works without LIMIT, or with LIMIT and OFFSET in either order; both require
+nonnegative integers. Use ORDER BY for stable pagination. For example:
+
+```sql
+SELECT frame, pts_seconds
+FROM frames
+WHERE pts_seconds BETWEEN 10 AND 20
+ORDER BY pts_seconds, sample_index
+LIMIT 50 OFFSET 100
+```
+
+Literals are
 numbers, `null`, `true`/`false`, or single-quoted strings (escape a quote
-as `''`). Comparisons are type-sensitive; null values never match. A trailing
+as `''`). Comparisons are type-sensitive; unknown predicates do not match. A trailing
 semicolon is accepted. Expressions support columns, literals, registered scalar
 functions (currently `motion`), and `LAG(...) OVER (...)`. No joins, aggregation,
 OR, arithmetic operators, CTEs, qualified/quoted identifiers, named windows,

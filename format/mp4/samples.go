@@ -207,6 +207,20 @@ func (p *parser) frameTable() (format.Table, error) {
 			dts[i] = dts[i-1] + durations[i-1]
 		}
 		name, trackID := p.s.Name, t.row["track_id"]
+		anchors := make([]int, count)
+		anchor, previous := -1, -1
+		for i := range anchors {
+			if s.sync == nil || s.sync[uint32(i+1)] {
+				previous = anchor
+				anchor = i
+			}
+			anchors[i] = anchor
+			// Open GOPs can contain B-frames referencing the preceding group.
+			// Warm up from that group when decoding an inter-frame sample.
+			if i != anchor && previous >= 0 {
+				anchors[i] = previous
+			}
+		}
 		indexed := format.Table{Columns: table.Columns, Count: count, ValueAt: func(i int, column string) any {
 			pts, duration := float64(dts[i]+offsets[i])/float64(scale), float64(durations[i])/float64(scale)
 			switch column {
@@ -232,7 +246,12 @@ func (p *parser) frameTable() (format.Table, error) {
 				}
 			case "frame":
 				if id, ok := trackID.(uint32); ok && locations != nil {
-					return format.Frame{Type: "frame", Source: name, TrackID: id, SampleIndex: i + 1, Offset: locations[i], Size: s.sizes[i], PTS: pts, Duration: duration}
+					frame := format.Frame{Type: "frame", Source: name, TrackID: id, SampleIndex: i + 1, Offset: locations[i], Size: s.sizes[i], PTS: pts, Duration: duration, Keyframe: s.sync == nil || s.sync[uint32(i+1)]}
+					if a := anchors[i]; a >= 0 {
+						frame.Seekable = true
+						frame.DecodeStart = float64(dts[a]+offsets[a]) / float64(scale)
+					}
+					return frame
 				}
 			}
 			return nil

@@ -15,14 +15,15 @@ type Query struct {
 	predicates []predicate
 	order      []orderTerm
 	limit      int
+	offset     int
 }
 type selection struct {
 	expression *expression
 	name       string
 }
 type predicate struct {
-	left, right *expression
-	op          string
+	left, right, upper *expression
+	op                 string
 }
 type orderTerm struct {
 	column           string
@@ -117,6 +118,11 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 				return Result{}, err
 			}
 		}
+		if p.upper != nil {
+			if err := validate(p.upper, known, functions, false); err != nil {
+				return Result{}, err
+			}
+		}
 	}
 	aliases := map[string]*expression{}
 	columns := make([]string, len(selects))
@@ -139,7 +145,7 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 	// Simple scans can stop at LIMIT. Windows and sorting still see their
 	// complete input, as required by SQL semantics.
 	if table.ValueAt != nil && len(q.order) == 0 && q.limit >= 0 && boundedScan(selects, predicates) {
-		rows, err := filterLimited(ctx, table, predicates, q.limit)
+		rows, err := filterLimited(ctx, table, predicates, pagePrefix(table.Len(), q.offset, q.limit))
 		if err != nil {
 			return Result{}, err
 		}
@@ -166,22 +172,27 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 					return Result{}, err
 				}
 			}
+			var upper []any
+			if p.upper != nil {
+				upper, err = input.evaluate(p.upper, active)
+				if err != nil {
+					return Result{}, err
+				}
+			}
 			for i, v := range left {
 				if i%1024 == 0 {
 					if err := ctx.Err(); err != nil {
 						return Result{}, err
 					}
 				}
-				match := false
-				if p.op == "IS NULL" {
-					match = v == nil
-				} else if p.op == "IS NOT NULL" {
-					match = v != nil
-				} else if v != nil && right[i] != nil {
-					cmp, compatible := compare(v, right[i])
-					match = compatible && compareOp(cmp, p.op)
+				var bound, high any
+				if right != nil {
+					bound = right[i]
 				}
-				matched[i] = matched[i] && match
+				if upper != nil {
+					high = upper[i]
+				}
+				matched[i] = matched[i] && matchesPredicate(p.op, v, bound, high)
 			}
 		}
 		selected := make([]int, 0)
@@ -194,8 +205,8 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 	}
 	e := newEvaluation(ctx, rows, functions)
 	count := rows.Len()
-	if len(q.order) == 0 && q.limit >= 0 && count > q.limit {
-		count = q.limit
+	if len(q.order) == 0 {
+		count = pagePrefix(count, q.offset, q.limit)
 	}
 	active := indices(count)
 	if len(q.order) > 0 {
@@ -214,6 +225,11 @@ func (q Query) executeWith(ctx context.Context, tables map[string]format.Table, 
 		if err := sortIndices(ctx, active, values, q.order); err != nil {
 			return Result{}, err
 		}
+	}
+	if q.offset >= len(active) {
+		active = active[:0]
+	} else {
+		active = active[q.offset:]
 	}
 	if q.limit >= 0 && len(active) > q.limit {
 		active = active[:q.limit]
@@ -286,6 +302,9 @@ func boundedScan(selects []selection, predicates []predicate) bool {
 		if p.right != nil && p.right.kind != "column" && p.right.kind != "literal" {
 			return false
 		}
+		if p.upper != nil && p.upper.kind != "column" && p.upper.kind != "literal" {
+			return false
+		}
 	}
 	return true
 }
@@ -315,19 +334,14 @@ func filterLimited(ctx context.Context, table format.Table, predicates []predica
 		matched := true
 		for _, p := range predicates {
 			a := value(p.left)
-			match := false
-			if p.op == "IS NULL" {
-				match = a == nil
-			} else if p.op == "IS NOT NULL" {
-				match = a != nil
-			} else {
-				b := value(p.right)
-				if a != nil && b != nil {
-					cmp, ok := compare(a, b)
-					match = ok && compareOp(cmp, p.op)
-				}
+			var b, upper any
+			if p.right != nil {
+				b = value(p.right)
 			}
-			if !match {
+			if p.upper != nil {
+				upper = value(p.upper)
+			}
+			if !matchesPredicate(p.op, a, b, upper) {
 				matched = false
 				break
 			}
@@ -382,4 +396,49 @@ func (q Query) SourceTable() string {
 		return q.subquery.SourceTable()
 	}
 	return q.table
+}
+
+// pagePrefix avoids overflow even when OFFSET and LIMIT are both MaxInt.
+func pagePrefix(count, offset, limit int) int {
+	if limit < 0 {
+		return count
+	}
+	if limit == 0 {
+		return 0
+	}
+	if offset >= count || limit >= count-offset {
+		return count
+	}
+	return offset + limit
+}
+
+func matchesPredicate(op string, value, lower, upper any) bool {
+	if op == "IS NULL" {
+		return value == nil
+	}
+	if op == "IS NOT NULL" {
+		return value != nil
+	}
+	if op == "BETWEEN" || op == "NOT BETWEEN" {
+		// Unknown comparisons remain unknown. NOT BETWEEN is true when either
+		// bound comparison is known false, even if the other bound is null.
+		compareBound := func(bound any, operator string) (bool, bool) {
+			if value == nil || bound == nil {
+				return false, false
+			}
+			cmp, ok := compare(value, bound)
+			return ok && compareOp(cmp, operator), ok
+		}
+		low, lowKnown := compareBound(lower, ">=")
+		high, highKnown := compareBound(upper, "<=")
+		if op == "NOT BETWEEN" {
+			return (lowKnown && !low) || (highKnown && !high)
+		}
+		return lowKnown && highKnown && low && high
+	}
+	if value == nil || lower == nil {
+		return false
+	}
+	cmp, ok := compare(value, lower)
+	return ok && compareOp(cmp, op)
 }

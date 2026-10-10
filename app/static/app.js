@@ -130,7 +130,10 @@ function setResultView(view) {
 }
 async function prepare(frames) {
   const ids = frames.filter(f => !ready.has(f.id)).map(f => f.id); if (!ids.length) return;
-  await api("/api/render", { ids }); ids.forEach(id => ready.add(id));
+  for (let start = 0; start < ids.length; start += 128) {
+    const batch = ids.slice(start, start + 128);
+    await api("/api/render", { ids: batch }); batch.forEach(id => ready.add(id));
+  }
 }
 function loadImage(frame) {
   if (images.has(frame.id)) return images.get(frame.id);
@@ -195,8 +198,8 @@ async function runQuery() {
         message(`${result.rows.length} rows received${timing()}…`, "busy");
         if (first && queue.length) show(queue[0], true).catch(error => { if (version === generation) message(`Preview: ${error.message}`, "error"); });
       } else if (event.type === "done") {
-        $("result-note").textContent = event.truncated ? "Showing 500 rows. Add LIMIT or narrow WHERE." : queue.length ? "Select rows for playback · click a frame to inspect" : "Scalar query results";
-        message(`${result.rows.length} rows returned${timing()}${event.truncated ? " · result capped at 500 rows" : ""}.`);
+        $("result-note").textContent = queue.length ? "Select rows for playback · click a frame to inspect" : "Scalar query results";
+        message(`${result.rows.length} rows returned${timing()}.`);
       }
     });
     if (version === generation) await refreshInfo().catch(() => {});

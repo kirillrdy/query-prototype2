@@ -20,6 +20,11 @@ type Frame struct {
 	Size        uint32  `json:"size"`
 	PTS         float64 `json:"pts_seconds"`
 	Duration    float64 `json:"duration_seconds"`
+	// DecodeStart is the preceding sync sample's presentation timestamp.
+	// These decoder hints stay internal; byte position remains frame identity.
+	DecodeStart float64 `json:"-"`
+	Seekable    bool    `json:"-"`
+	Keyframe    bool    `json:"-"`
 }
 
 // Table has an explicit schema, including when it has no rows.

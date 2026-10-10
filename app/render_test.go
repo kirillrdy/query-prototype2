@@ -39,7 +39,7 @@ func TestRenderedSelectionMatchesPicturesAndRawBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newTestServer(t, path)
-	w := request(s, "POST", "/api/query", []byte(`{"sql":"SELECT frame, path FROM frames WHERE sample_index >= 2 AND sample_index <= 5"}`))
+	w := request(s, "POST", "/api/query", []byte(`{"sql":"SELECT frame, path FROM frames WHERE sample_index BETWEEN 2 AND 5"}`))
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
@@ -116,7 +116,7 @@ func TestRenderedSelectionMatchesPicturesAndRawBytes(t *testing.T) {
 	if _, err := command(ctx, ffmpeg, "-v", "error", "-nostdin", "-ignore_editlist", "1", "-i", path, "-an", "-vf", "scale=160:90,format=gray", "-fps_mode", "vfr", "-c:v", "rawvideo", "-pix_fmt", "gray", "-f", "image2", filepath.Join(grayDir, "%06d.gray")); err != nil {
 		t.Fatal(err)
 	}
-	w = request(s, "POST", "/api/query", []byte(`{"sql":"SELECT frame, motion(frame, LAG(frame) OVER (PARTITION BY path, track_id ORDER BY pts_seconds, sample_index)) AS motion_score FROM frames WHERE sample_index >= 2 AND sample_index <= 5 ORDER BY pts_seconds"}`))
+	w = request(s, "POST", "/api/query", []byte(`{"sql":"SELECT frame, motion(frame, LAG(frame) OVER (PARTITION BY path, track_id ORDER BY pts_seconds, sample_index)) AS motion_score FROM frames WHERE sample_index BETWEEN 2 AND 5 ORDER BY pts_seconds"}`))
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
@@ -155,7 +155,7 @@ func TestRenderedSelectionMatchesPicturesAndRawBytes(t *testing.T) {
 		previous = current
 	}
 	cold := newTestServer(t, path)
-	streamed := request(cold, "POST", "/api/query/stream", []byte(`{"sql":"SELECT frame, motion(frame, LAG(frame) OVER (PARTITION BY path, track_id ORDER BY pts_seconds, sample_index)) AS motion_score FROM frames WHERE sample_index >= 2 AND sample_index <= 5 ORDER BY pts_seconds"}`))
+	streamed := request(cold, "POST", "/api/query/stream", []byte(`{"sql":"SELECT frame, motion(frame, LAG(frame) OVER (PARTITION BY path, track_id ORDER BY pts_seconds, sample_index)) AS motion_score FROM frames WHERE sample_index BETWEEN 2 AND 5 ORDER BY pts_seconds"}`))
 	if streamed.Code != 200 {
 		t.Fatal(streamed.Body.String())
 	}
@@ -241,5 +241,103 @@ func TestMotionLargerSelectionAfterCachedFrames(t *testing.T) {
 				t.Fatalf("row %d has invalid motion score", i+1)
 			}
 		}
+	}
+}
+
+// OFFSET must retain the preceding keyframe for LAG while decoding only the
+// selected page. Compare streamed scores against a separate full movie decode.
+func TestStreamMotionOverLateKeyframePage(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "late-keyframes.mp4")
+	if _, err := command(ctx, ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=32x32:rate=25", "-frames:v", "360", "-c:v", "mpeg4", "-bf", "2", path); err != nil {
+		t.Fatal(err)
+	}
+	baselinePath := filepath.Join(dir, "baseline.gray")
+	if _, err := command(ctx, ffmpeg, "-v", "error", "-ignore_editlist", "1", "-i", path, "-an", "-vf", "scale=160:90,format=gray", "-fps_mode", "vfr", "-c:v", "rawvideo", "-pix_fmt", "gray", "-f", "rawvideo", baselinePath); err != nil {
+		t.Fatal(err)
+	}
+	pixels, err := os.ReadFile(baselinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer(t, path)
+	w := request(s, "POST", "/api/query/stream", []byte(`{"sql":"SELECT frame, pts_seconds, motion(frame, LAG(frame) OVER (PARTITION BY path, track_id ORDER BY pts_seconds, sample_index)) AS motion_score FROM frames WHERE is_keyframe = true ORDER BY path, track_id, pts_seconds LIMIT 5 OFFSET 20"}`))
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	table := s.sources[0].tables["frames"]
+	ordered := make([]FrameValue, table.Len())
+	for i := range ordered {
+		ordered[i] = table.Value(i, "frame").(FrameValue)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].PTS < ordered[j].PTS })
+	keyOrdinals := []int{}
+	for i, frame := range ordered {
+		if frame.Keyframe {
+			keyOrdinals = append(keyOrdinals, i)
+		}
+	}
+	decoder := json.NewDecoder(w.Body)
+	count, batches := 0, 0
+	done := false
+	for decoder.More() {
+		var event struct {
+			Type  string
+			Error string
+			Rows  []struct {
+				Frame FrameValue
+				Score *float64 `json:"motion_score"`
+			}
+		}
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == "error" {
+			t.Fatal(event.Error)
+		}
+		if event.Type == "done" {
+			done = true
+		}
+		if event.Type == "rows" {
+			batches++
+			if batches == 1 && len(event.Rows) != 1 {
+				t.Fatal("first completed row was not streamed immediately")
+			}
+		}
+		for _, row := range event.Rows {
+			if count >= 5 {
+				t.Fatal("too many rows")
+			}
+			current, previous := keyOrdinals[20+count], keyOrdinals[19+count]
+			if row.Frame.SampleIndex != ordered[current].SampleIndex || row.Score == nil {
+				t.Fatalf("row %d lost exact frame identity or preceding LAG value", count)
+			}
+			const size = 160 * 90
+			delta := 0
+			for i, pixel := range pixels[current*size : (current+1)*size] {
+				d := int(pixel) - int(pixels[previous*size+i])
+				if d < 0 {
+					d = -d
+				}
+				delta += d
+			}
+			want := float64(delta) / (255 * size)
+			if *row.Score != want {
+				t.Fatalf("row %d score=%g want=%g", count, *row.Score, want)
+			}
+			count++
+		}
+	}
+	if !done || count != 5 || batches < 2 {
+		t.Fatalf("done=%v rows=%d batches=%d", done, count, batches)
 	}
 }

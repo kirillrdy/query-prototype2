@@ -137,6 +137,25 @@ func (p *parser) query() (Query, error) {
 				if err := p.take("NULL"); err != nil {
 					return q, err
 				}
+			} else if p.peek("BETWEEN") || p.peek("NOT") {
+				pred.op = "BETWEEN"
+				if p.accept("NOT") {
+					pred.op = "NOT BETWEEN"
+				}
+				if err := p.take("BETWEEN"); err != nil {
+					return q, err
+				}
+				pred.right, err = p.expression(0)
+				if err != nil {
+					return q, err
+				}
+				if err := p.take("AND"); err != nil {
+					return q, err
+				}
+				pred.upper, err = p.expression(0)
+				if err != nil {
+					return q, err
+				}
 			} else {
 				if p.i >= len(p.tokens) {
 					return q, fmt.Errorf("missing comparison operator")
@@ -167,16 +186,27 @@ func (p *parser) query() (Query, error) {
 			return q, err
 		}
 	}
-	if p.accept("LIMIT") {
+	seen := map[string]bool{}
+	for p.peek("LIMIT") || p.peek("OFFSET") {
+		clause := strings.ToUpper(p.tokens[p.i].text)
+		if seen[clause] {
+			return q, fmt.Errorf("duplicate %s clause", clause)
+		}
+		seen[clause] = true
+		p.i++
 		if p.i >= len(p.tokens) || p.tokens[p.i].quoted {
-			return q, fmt.Errorf("missing LIMIT integer")
+			return q, fmt.Errorf("missing %s integer", clause)
 		}
 		n, err := strconv.Atoi(p.tokens[p.i].text)
 		if err != nil || n < 0 {
-			return q, fmt.Errorf("LIMIT must be a nonnegative integer")
+			return q, fmt.Errorf("%s must be a nonnegative integer", clause)
 		}
 		p.i++
-		q.limit = n
+		if clause == "LIMIT" {
+			q.limit = n
+		} else {
+			q.offset = n
+		}
 	}
 	return q, nil
 }
