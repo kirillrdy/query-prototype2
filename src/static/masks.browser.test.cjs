@@ -138,6 +138,16 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         check(tableBody.firstElementChild === hiddenTableRow, 'Streaming skips hidden table rendering');
         setResultView('table');
         check(tableBody.children.length === 1200, 'Table catches up when selected');
+        $('sql').value = "CREATE INDEX people ON frames('fixture.mp4') (person_count(frame))";
+        const building = runQuery();
+        await until(() => $('message').textContent.startsWith('Preparing index people'));
+        check(!$('message').textContent.includes('100%'), 'Preparation does not pretend the index is complete');
+        await until(() => $('message').textContent.includes('2/4 frames (50%)'));
+        check($('message').textContent.includes('2 remaining') && $('result-note').querySelector('.spinner'), 'Index progress shows completed and remaining frames');
+        check(result.rows.length === 0, 'Progress events do not become result rows');
+        await building;
+        check($('message').textContent.startsWith('Index people built: 4 frames') && $('result-note').textContent === 'Index ready', 'Completion reports the saved index');
+        check(result.rows[0].indexed_frames === 4, 'Index summary remains available');
         await fetch('/__report', { method: 'POST', body: JSON.stringify({ ok: true }) });
       } catch (error) { await fetch('/__report', { method: 'POST', body: JSON.stringify({ error: error.message }) }); }
     })();`;
@@ -154,6 +164,18 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
     if (req.url === '/api/query/stream') {
       let data = ''; req.on('data', chunk => { data += chunk; });
       req.on('end', () => {
+        if (JSON.parse(data).sql.startsWith('CREATE INDEX')) {
+          res.setHeader('content-type', 'application/x-ndjson');
+          res.write(JSON.stringify({ type: 'progress', index: 'people', completed: 0, total: 0, phase: 'preparing' }) + '\n');
+          setTimeout(() => res.write(JSON.stringify({ type: 'progress', index: 'people', completed: 2, total: 4, phase: 'indexing' }) + '\n'), 100);
+          setTimeout(() => res.end([
+            { type: 'progress', index: 'people', completed: 4, total: 4, phase: 'saving' },
+            { type: 'progress', index: 'people', completed: 4, total: 4, phase: 'complete' },
+            { type: 'schema', columns: ['index', 'indexed_frames'] },
+            { type: 'rows', rows: [{ index: 'people', indexed_frames: 4 }] }, { type: 'done' }
+          ].map(JSON.stringify).join('\n') + '\n'), 200);
+          return;
+        }
         if (JSON.parse(data).sql.includes('LIMIT 1200')) {
           res.setHeader('content-type', 'application/x-ndjson');
           res.write(JSON.stringify({ type: 'schema', columns: ['frame_index', 'pts_seconds'] }) + '\n');

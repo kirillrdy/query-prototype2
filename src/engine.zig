@@ -11,10 +11,19 @@ pub const Function = struct {
     evaluate: *const fn (*anyopaque, A, t.Control, []const V) anyerror!V,
     prepare: ?*const fn (*anyopaque, A, t.Control, []const []const V) anyerror!void = null,
     index_identity: ?*const fn (*anyopaque, A, []const u8) anyerror![]const u8 = null,
+    show_indexes: ?*const fn (*anyopaque, A, t.Control) anyerror!t.Result = null,
     create_index: ?*const fn (*anyopaque, A, t.Control, []const u8, []const u8, []const u8, t.Result) anyerror!t.Result = null,
 };
 pub const Functions = std.StringHashMap(Function);
-pub const Emit = struct { context: *anyopaque, send: *const fn (*anyopaque, t.Result, bool) anyerror!void };
+pub const Progress = struct { index: []const u8, completed: usize, total: usize, phase: enum { preparing, waiting, indexing, saving, complete } };
+pub const Emit = struct {
+    context: *anyopaque,
+    send: *const fn (*anyopaque, t.Result, bool) anyerror!void,
+    progress: ?*const fn (*anyopaque, Progress) anyerror!void = null,
+    pub fn report(out: Emit, value: Progress) !void {
+        if (out.progress) |notify| try notify(out.context, value);
+    }
+};
 fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
@@ -251,16 +260,56 @@ fn orderRows(e: *Eval, selects: []const p.Selection, orders: []const p.Order) ![
 }
 pub fn execute(a: A, control: t.Control, q: Query, tables: t.Tables, functions: Functions, emit: ?Emit) anyerror!t.Result {
     try control.check();
+    if (q.show_indexes) {
+        const function = functions.get("person_count") orelse return error.UnknownFunction;
+        const list = function.show_indexes orelse return error.UnsupportedIndex;
+        const result = try list(function.context, a, control);
+        if (emit) |out| {
+            try out.send(out.context, .{ .columns = result.columns, .rows = &.{} }, true);
+            try out.send(out.context, result, false);
+        }
+        return result;
+    }
     if (q.create_index) |name| {
         const function = functions.get("person_count") orelse return error.UnknownFunction;
         const save = function.create_index orelse return error.UnsupportedIndex;
         const identity = function.index_identity orelse return error.UnsupportedIndex;
         const fingerprint = try identity(function.context, a, q.filename.?);
-        var select = q;
-        select.create_index = null;
-        const values = try execute(a, control, select, tables, functions, null);
+        const table = tables.get(q.table) orelse return error.UnknownTable;
+        var evaluator = Eval.init(a, control, table, functions);
+        for (q.predicates) |pred| {
+            try validate(pred.left, table, functions, false);
+            if (pred.right) |expr| try validate(expr, table, functions, false);
+            if (pred.upper) |expr| try validate(expr, table, functions, false);
+        }
+        try validate(q.selects[0].expression, table, functions, false);
+        // Unfiltered builds know their total from metadata in O(1). Filtered
+        // builds retain only row numbers; frame references remain lazy.
+        var selected: std.ArrayList(usize) = .empty;
+        if (q.predicates.len != 0) for (0..table.count) |row| {
+            if (try evaluator.matches(row, q.predicates)) try selected.append(a, row);
+        };
+        const total = if (q.predicates.len == 0) table.count else selected.items.len;
+        if (emit) |out| try out.report(.{ .index = name, .completed = 0, .total = total, .phase = .indexing });
+        const rows = try a.alloc([]const V, total);
+        var last_report = std.Io.Timestamp.now(control.io, .awake).nanoseconds;
+        for (rows, 0..) |*row, i| {
+            try control.check();
+            const index = if (q.predicates.len == 0) i else selected.items[i];
+            const frame = try evaluator.value(q.selects[0].expression, index);
+            const count = try function.evaluate(function.context, a, control, &.{frame});
+            row.* = try a.dupe(V, &.{ frame, count });
+            const now = std.Io.Timestamp.now(control.io, .awake).nanoseconds;
+            if (i + 1 == rows.len or now - last_report >= 250 * std.time.ns_per_ms) {
+                if (emit) |out| try out.report(.{ .index = name, .completed = i + 1, .total = rows.len, .phase = .indexing });
+                last_report = now;
+            }
+        }
+        const values = t.Result{ .columns = &.{ "frame", "people" }, .rows = rows };
+        if (emit) |out| try out.report(.{ .index = name, .completed = rows.len, .total = rows.len, .phase = .saving });
         const result = try save(function.context, a, control, name, q.filename.?, fingerprint, values);
         if (emit) |out| {
+            try out.report(.{ .index = name, .completed = rows.len, .total = rows.len, .phase = .complete });
             try out.send(out.context, .{ .columns = result.columns, .rows = &.{} }, true);
             try out.send(out.context, result, false);
         }
@@ -483,4 +532,78 @@ test "streamed query rows serialize structured mask values" {
     var stream = Stream{ .a = a };
     _ = try execute(a, .{ .io = std.testing.io }, try parse(a, "SELECT frame_index, segmentation FROM frames WHERE frame_index = 3000 LIMIT 1"), tables, Functions.init(a), .{ .context = &stream, .send = Stream.send });
     try std.testing.expectEqual(@as(usize, 1), stream.rows);
+}
+
+test "index progress counts filtered frames and completes only after saving" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rows = [_][]const V{ &.{ .{ .int = 1 }, .{ .int = 1 } }, &.{ .{ .int = 2 }, .{ .int = 2 } }, &.{ .{ .int = 3 }, .{ .int = 3 } } };
+    const data = t.Result{ .columns = &.{ "frame", "frame_index" }, .rows = &rows };
+    const Source = struct {
+        base: t.Table,
+        reads: usize = 0,
+        fn get(ctx: *const anyopaque, row: usize, col: usize) V {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(ctx)));
+            if (col == 0) self.reads += 1;
+            return self.base.get(self.base.context, row, col);
+        }
+    };
+    var source = Source{ .base = data.table() };
+    var tables = t.Tables.init(a);
+    try tables.put("frames", .{ .columns = data.columns, .count = rows.len, .context = &source, .get = Source.get });
+    const State = struct {
+        calls: usize = 0,
+        saved: bool = false,
+        fail_save: bool = false,
+        events: std.ArrayList(Progress) = .empty,
+        allocator: A,
+        source: *Source,
+        fn identity(_: *anyopaque, _: A, _: []const u8) ![]const u8 {
+            return "fixture";
+        }
+        fn evaluate(ctx: *anyopaque, _: A, _: t.Control, args: []const V) !V {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            return args[0];
+        }
+        fn save(ctx: *anyopaque, _: A, _: t.Control, _: []const u8, _: []const u8, _: []const u8, values: t.Result) !t.Result {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.fail_save) return error.TestSaveFailed;
+            self.saved = true;
+            return values;
+        }
+        fn send(_: *anyopaque, _: t.Result, _: bool) !void {}
+        fn progress(ctx: *anyopaque, value: Progress) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (value.phase == .complete) try std.testing.expect(self.saved);
+            if (self.events.items.len == 0) {
+                try std.testing.expectEqual(@as(usize, 0), self.calls);
+                try std.testing.expectEqual(@as(usize, 0), self.source.reads);
+            }
+            try self.events.append(self.allocator, value);
+        }
+    };
+    var state = State{ .allocator = a, .source = &source };
+    var functions = Functions.init(a);
+    try functions.put("person_count", .{ .arity = 1, .context = &state, .evaluate = State.evaluate, .create_index = State.save, .index_identity = State.identity });
+    const query = try parse(a, "CREATE INDEX people ON frames('fixture') (person_count(frame)) WHERE frame_index <= 2");
+    const emit = Emit{ .context = &state, .send = State.send, .progress = State.progress };
+    _ = try execute(a, .{ .io = std.testing.io }, query, tables, functions, emit);
+    try std.testing.expectEqual(@as(usize, 2), state.calls);
+    try std.testing.expectEqual(@as(usize, 0), state.events.items[0].completed);
+    for (state.events.items) |event| try std.testing.expectEqual(@as(usize, 2), event.total);
+    try std.testing.expect(state.events.items[state.events.items.len - 1].phase == .complete);
+    source.reads = 0;
+    state = .{ .allocator = a, .source = &source };
+    var unfiltered = query;
+    unfiltered.predicates = &.{};
+    _ = try execute(a, .{ .io = std.testing.io }, unfiltered, tables, functions, emit);
+    try std.testing.expectEqual(@as(usize, 3), source.reads);
+    try std.testing.expectEqual(@as(usize, 3), state.events.items[0].total);
+    source.reads = 0;
+    state = .{ .allocator = a, .source = &source, .fail_save = true };
+    try std.testing.expectError(error.TestSaveFailed, execute(a, .{ .io = std.testing.io }, query, tables, functions, emit));
+    try std.testing.expect(!state.saved);
+    try std.testing.expect(state.events.items[state.events.items.len - 1].phase == .saving);
 }

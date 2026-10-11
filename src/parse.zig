@@ -69,6 +69,7 @@ pub const Expr = struct {
 pub const Selection = struct { expression: *Expr, name: []const u8 };
 pub const Predicate = struct { left: *Expr, right: ?*Expr = null, upper: ?*Expr = null, op: enum { eq, ne, lt, le, gt, ge, is_null, is_not_null, between, not_between } };
 pub const Query = struct {
+    show_indexes: bool = false,
     create_index: ?[]const u8 = null,
     table: []const u8 = "",
     filename: ?[]const u8 = null,
@@ -183,6 +184,12 @@ const Parser = struct {
         defer p.depth -= 1;
         if (p.depth > 32) return error.QueryNestingLimit;
         var q: Query = .{};
+        if (p.accept("show")) {
+            if (p.depth != 1) return error.UnsupportedStatement;
+            try p.take("indexes");
+            q.show_indexes = true;
+            return q;
+        }
         if (p.accept("create")) {
             if (p.depth != 1) return error.UnsupportedIndex;
             try p.take("index");
@@ -413,4 +420,13 @@ test "CREATE INDEX accepts frame filters and rejects unsupported expressions" {
     try std.testing.expectError(error.UnsupportedIndexExpression, parse(a, "CREATE INDEX bad ON frames('video.mp4') (motion(frame, frame))"));
     try std.testing.expectError(error.UnsupportedIndexPredicate, parse(a, "CREATE INDEX bad ON frames('video.mp4') (person_count(frame)) WHERE person_count(frame) > 0"));
     try std.testing.expectError(error.UnsupportedIndex, parse(a, "CREATE INDEX bad ON frames('video.mp4') (person_count(frame)) LIMIT 100"));
+}
+
+test "SHOW INDEXES is a standalone statement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try parse(a, "SHOW INDEXES;")).show_indexes);
+    try std.testing.expectError(error.UnexpectedToken, parse(a, "SHOW INDEXES FROM frames"));
+    try std.testing.expectError(error.UnsupportedStatement, parse(a, "SELECT * FROM (SHOW INDEXES) AS x"));
 }

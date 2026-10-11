@@ -171,18 +171,23 @@ const Server = struct {
         }
         return error.UnknownSource;
     }
-    fn query(s: *Server, a: A, request: *Request, c: t.Control, streaming: bool) !void {
-        const input = try readJSON(struct { sql: []const u8 }, a, request);
-        const q = try engine.parse(a, input.sql);
-        if (!q.uses(&.{ "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) setDeadline(c);
-        const input_tables = try s.tables(a, c, q.source(), q.sourceFile());
+    fn executeQuery(s: *Server, a: A, c: t.Control, q: engine.Query, emit: ?engine.Emit) !t.Result {
+        if (q.create_index) |name| if (emit) |out| try out.report(.{ .index = name, .completed = 0, .total = 0, .phase = .preparing });
+        const input_tables = if (q.show_indexes) t.Tables.init(a) else try s.tables(a, c, q.source(), q.sourceFile());
+        if (q.create_index) |name| if (emit) |out| try out.report(.{ .index = name, .completed = 0, .total = 0, .phase = .waiting });
         // Only native model and decoder operations share the inference lock.
         // Source metadata and raw downloads remain accessible during inference.
         try lockWithControl(&s.inference_mutex, c);
         defer s.inference_mutex.unlock(s.io);
         const functions = try s.runtime.functions(a);
+        return engine.execute(a, c, q, input_tables, functions, emit);
+    }
+    fn query(s: *Server, a: A, request: *Request, c: t.Control, streaming: bool) !void {
+        const input = try readJSON(struct { sql: []const u8 }, a, request);
+        const q = try engine.parse(a, input.sql);
+        if (!q.uses(&.{ "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) setDeadline(c);
         if (!streaming) {
-            const result = try engine.execute(a, c, q, input_tables, functions, null);
+            const result = try s.executeQuery(a, c, q, null);
             // Keep the original web API's truncated field.
             const bytes = try std.json.Stringify.valueAlloc(a, result, .{});
             const body = try std.fmt.allocPrint(a, "{s},\"truncated\":false}}", .{bytes[0 .. bytes.len - 1]});
@@ -195,6 +200,10 @@ const Server = struct {
             a: A,
             body: *std.http.BodyWriter,
             columns: []const []const u8 = &.{},
+            fn progress(ctx: *anyopaque, value: engine.Progress) !void {
+                const stream: *@This() = @ptrCast(@alignCast(ctx));
+                try stream.write(.{ .type = "progress", .index = value.index, .completed = value.completed, .total = value.total, .phase = value.phase });
+            }
             fn send(ctx: *anyopaque, result: t.Result, schema: bool) !void {
                 const stream: *@This() = @ptrCast(@alignCast(ctx));
                 if (schema) {
@@ -208,6 +217,7 @@ const Server = struct {
                     try stream.body.writer.writeAll("{\"type\":\"rows\",\"rows\":");
                     try stream.body.writer.writeAll(json[rows_start .. json.len - 1]);
                     try stream.body.writer.writeAll("}\n");
+                    try stream.body.writer.flush();
                     try stream.body.flush();
                 }
             }
@@ -216,11 +226,12 @@ const Server = struct {
                 defer stream.a.free(json);
                 try stream.body.writer.writeAll(json);
                 try stream.body.writer.writeByte('\n');
+                try stream.body.writer.flush();
                 try stream.body.flush();
             }
         };
         var out = Stream{ .a = a, .body = &body };
-        _ = engine.execute(a, c, q, input_tables, functions, .{ .context = &out, .send = Stream.send }) catch |err| {
+        _ = s.executeQuery(a, c, q, .{ .context = &out, .send = Stream.send, .progress = Stream.progress }) catch |err| {
             out.write(.{ .type = "error", .@"error" = @errorName(err) }) catch {};
             body.end() catch {};
             return;

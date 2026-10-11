@@ -156,6 +156,18 @@ and RLE timings. The first inference includes model and GPU initialization.
 
 ### Persistent person-count indexes
 
+List saved indexes in the console or web editor:
+
+```sql
+SHOW INDEXES;
+```
+
+This shows the index name, video path, expression, indexed frame count, and
+status (`valid`, `stale`, or `unknown`). Older indexes without saved source paths
+have `unknown` status; rebuilding them records the path for validity checks.
+Unreadable or corrupt index files are also listed with their status. Listing
+indexes requires no input video, decoding, or inference.
+
 Build a reusable index in the SQL console, with `-c`, or in the web query editor:
 
 ```sql
@@ -167,7 +179,14 @@ WHERE frame_index <= 100;
 Omit `WHERE` to index the entire video. Index filters accept frame metadata
 predicates; inference expressions, ORDER BY, and pagination are not supported
 in index definitions. Building the index runs detection once per covered frame
-and returns its name and indexed frame count. Running the same definition again
+and shows completed frames, percentage, remaining frames, and a saving stage in
+the CLI and web editor. CLI progress goes to stderr so JSON output stays valid.
+The web stream reports preparation and waiting for inference immediately.
+Each progress event flushes both the response body and socket buffers.
+Unfiltered builds get their frame total directly from metadata and fetch each
+frame reference as it is processed, without first materializing every frame.
+Completion is reported after the index is saved. It returns the index name and
+indexed frame count. Running the same definition again
 atomically replaces the named index for that video.
 
 Normal queries automatically use saved counts in both projections and filters:

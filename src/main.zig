@@ -29,18 +29,46 @@ fn execute(a: A, io: std.Io, video: *q.video.Runtime, sql: []const u8, files: []
         if (files.len != 0) return error.ConflictingInputFiles;
         break :blk try a.dupe([]const u8, &.{filename});
     } else files;
-    if (paths.len == 0) return error.InputFileRequired;
+    if (paths.len == 0 and !parsed.show_indexes) return error.InputFileRequired;
     if (!parsed.uses(&.{ "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) {
         check.deadline_ns = std.Io.Timestamp.now(io, .awake).nanoseconds + 120 * std.time.ns_per_s;
     }
     var tables = q.types.Tables.init(a);
     var parts: std.ArrayList(q.types.Table) = .empty;
-    for (paths) |path| {
+    for (if (parsed.show_indexes) &.{} else paths) |path| {
         const all = try q.mp4.read(a, c, path, path, parsed.source());
         try parts.append(a, all.get(parsed.source()) orelse return error.UnknownTable);
     }
-    try tables.put(parsed.source(), try q.types.combine(a, parts.items));
-    const result = try q.engine.execute(a, c, parsed, tables, try video.functions(a), null);
+    if (!parsed.show_indexes) try tables.put(parsed.source(), try q.types.combine(a, parts.items));
+    const ProgressOutput = struct {
+        io: std.Io,
+        terminal: bool,
+        fn send(_: *anyopaque, _: q.types.Result, _: bool) !void {}
+        fn progress(ctx: *anyopaque, value: q.engine.Progress) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            var buffer: [1024]u8 = undefined;
+            const percent = if (value.total == 0) @as(usize, 100) else value.completed * 100 / value.total;
+            const label = switch (value.phase) {
+                .preparing => "Preparing",
+                .waiting => "Waiting for",
+                .indexing => "Indexing",
+                .saving => "Saving",
+                .complete => "Built",
+            };
+            const stderr = std.Io.File.stderr();
+            if (self.terminal) try stderr.writeStreamingAll(self.io, "\r\x1b[2K");
+            try stderr.writeStreamingAll(self.io, label);
+            try stderr.writeStreamingAll(self.io, " ");
+            try stderr.writeStreamingAll(self.io, value.index);
+            const line = try std.fmt.bufPrint(&buffer, ": {d}/{d} frames ({d}%) · {d} remaining{s}", .{ value.completed, value.total, percent, value.total - value.completed, if (!self.terminal or value.phase == .complete) "\n" else "" });
+            try stderr.writeStreamingAll(self.io, line);
+        }
+    };
+    var progress = ProgressOutput{ .io = io, .terminal = try std.Io.File.stderr().isTty(io) };
+    const result = q.engine.execute(a, c, parsed, tables, try video.functions(a), if (parsed.create_index != null) .{ .context = &progress, .send = ProgressOutput.send, .progress = ProgressOutput.progress } else null) catch |err| {
+        if (parsed.create_index != null and progress.terminal) std.Io.File.stderr().writeStreamingAll(io, "\n") catch {};
+        return err;
+    };
     if (options.json) {
         try write(io, try std.json.Stringify.valueAlloc(a, result, .{ .whitespace = .indent_2 }));
         try write(io, "\n");

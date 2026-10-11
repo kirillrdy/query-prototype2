@@ -194,7 +194,7 @@ async function runQuery() {
   if (queryController) queryController.abort();
   if (renderRequest != null) { cancelAnimationFrame(renderRequest); renderRequest = null; }
   const controller = new AbortController(); queryController = controller;
-  const version = ++generation, started = performance.now(); let firstRow = null;
+  const version = ++generation, started = performance.now(); let firstRow = null, indexProgress = null;
   previewVersion++; stop(); $("run").disabled = true; $("cancel-query").hidden = false; message("Running query…", "busy");
   result = { columns: [], rows: [] }; graphAxesChosen = false; renderResults(); updateQueue();
   frameRows.clear(); clearMasks();
@@ -204,7 +204,15 @@ async function runQuery() {
   try {
     await readQueryStream($("sql").value, controller.signal, event => {
       if (version !== generation) return;
-      if (event.type === "schema") {
+      if (event.type === "progress") {
+        indexProgress = event;
+        const percent = event.total ? Math.floor(event.completed * 100 / event.total) : 100;
+        const label = event.phase === "saving" ? "Saving index" : event.phase === "complete" ? "Index built" : "Building index";
+        const status = event.phase === "preparing" ? `Preparing index ${event.index}…` : event.phase === "waiting" ? `Waiting to build index ${event.index}…` : `${label} ${event.index}: ${event.completed}/${event.total} frames (${percent}%) · ${event.total - event.completed} remaining`;
+        message(status, event.phase === "complete" ? "" : "busy");
+        const spinner = text("span", "", "spinner"); spinner.setAttribute("aria-hidden", "true");
+        $("result-note").replaceChildren(spinner, text("span", status));
+      } else if (event.type === "schema") {
         result.columns = event.columns; renderResults(); $("result-note").textContent = "Preparing query input…";
       } else if (event.type === "rows") {
         const first = result.rows.length === 0;
@@ -224,7 +232,10 @@ async function runQuery() {
       } else if (event.type === "done") {
         flushResults();
         $("result-note").textContent = queue.length ? "Click a frame to inspect" : "Scalar query results";
-        message(`${result.rows.length} rows returned${timing()}.`);
+        if (indexProgress?.phase === "complete") {
+          $("result-note").textContent = "Index ready";
+          message(`Index ${indexProgress.index} built: ${indexProgress.total} frames · ${((performance.now() - started) / 1000).toFixed(2)} s.`);
+        } else message(`${result.rows.length} rows returned${timing()}.`);
       }
     });
     if (version === generation) await refreshInfo().catch(() => {});
@@ -232,8 +243,13 @@ async function runQuery() {
     if (version === generation) {
       flushResults();
       const canceled = controller.signal.aborted;
-      $("result-note").textContent = `${canceled ? "Canceled" : "Incomplete query"} · ${result.rows.length} rows received`;
-      message(canceled ? `Query canceled. ${result.rows.length} received rows remain available.` : `${error.message} (${result.rows.length} rows received; result incomplete)`, canceled ? "" : "error");
+      if (indexProgress) {
+        $("result-note").textContent = canceled ? "Index build canceled" : "Index build failed";
+        message(`${canceled ? "Index build canceled" : error.message} · ${indexProgress.completed}/${indexProgress.total} frames processed`, canceled ? "" : "error");
+      } else {
+        $("result-note").textContent = `${canceled ? "Canceled" : "Incomplete query"} · ${result.rows.length} rows received`;
+        message(canceled ? `Query canceled. ${result.rows.length} received rows remain available.` : `${error.message} (${result.rows.length} rows received; result incomplete)`, canceled ? "" : "error");
+      }
     }
   } finally {
     if (version === generation) { $("run").disabled = false; $("cancel-query").hidden = true; queryController = null; }

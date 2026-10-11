@@ -108,6 +108,7 @@ pub const Runtime = struct {
         f.getPtr("motion").?.prepare = prepareMotion;
         f.getPtr("person_count").?.create_index = createPersonIndex;
         f.getPtr("person_count").?.index_identity = personIndexIdentity;
+        f.getPtr("person_count").?.show_indexes = showPersonIndexes;
         return f;
     }
     pub fn checkSource(r: *Runtime, frame: t.Frame) !void {
@@ -471,6 +472,11 @@ fn personIndexIdentity(ctx: *anyopaque, a: A, source: []const u8) ![]const u8 {
     const r = runtime(ctx);
     const config = try person_index.Store.settings(a, r.io, try confidence("BQUERY_DETECTION_CONFIDENCE", 0.25));
     return r.person_indexes.identity(a, source, config);
+}
+fn showPersonIndexes(ctx: *anyopaque, a: A, control: t.Control) !t.Result {
+    const r = runtime(ctx);
+    const config = if (confidence("BQUERY_DETECTION_CONFIDENCE", 0.25)) |threshold| person_index.Store.settings(a, r.io, threshold) catch null else |_| null;
+    return r.person_indexes.list(a, control, config);
 }
 fn createPersonIndex(ctx: *anyopaque, a: A, control: t.Control, name: []const u8, source: []const u8, fingerprint: []const u8, values: t.Result) !t.Result {
     const r = runtime(ctx);

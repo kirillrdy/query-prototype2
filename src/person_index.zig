@@ -3,7 +3,7 @@ const t = @import("types.zig");
 const A = std.mem.Allocator;
 const Key = struct { track: u32, frame: usize };
 const Entry = struct { track: u32, frame: usize, people: u32 };
-const Document = struct { version: u32 = 1, name: []const u8, fingerprint: []const u8, entries: []const Entry };
+const Document = struct { version: u32 = 1, name: []const u8, source: ?[]const u8 = null, fingerprint: []const u8, entries: []const Entry };
 const Bucket = std.AutoHashMap(Key, u32);
 const Cache = struct { values: Bucket, stamp: ?i96 };
 pub const Store = struct {
@@ -28,6 +28,65 @@ pub const Store = struct {
     }
     fn getRoot(s: *Store, a: A) ![]const u8 {
         return s.directory orelse try root(a);
+    }
+    pub fn list(s: *Store, a: A, c: t.Control, config: ?[]const u8) !t.Result {
+        const columns: []const []const u8 = &.{ "index", "path", "expression", "indexed_frames", "status" };
+        const directory = try s.getRoot(a);
+        const dir = std.Io.Dir.cwd().openDir(s.io, directory, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => return .{ .columns = columns, .rows = &.{} },
+            else => return err,
+        };
+        defer dir.close(s.io);
+        var rows: std.ArrayList([]const t.Value) = .empty;
+        var iterator = dir.iterate();
+        while (try iterator.next(s.io)) |entry| {
+            try c.check();
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+            var arena = std.heap.ArenaAllocator.init(a);
+            defer arena.deinit();
+            const alloc = arena.allocator();
+            const bytes = dir.readFileAlloc(s.io, entry.name, alloc, .limited(64 << 20)) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    try rows.append(a, try a.dupe(t.Value, &.{ .{ .string = try a.dupe(u8, entry.name) }, .null, .{ .string = "person_count(frame)" }, .null, .{ .string = "unreadable" } }));
+                    continue;
+                },
+            };
+            const parsed = std.json.parseFromSlice(Document, alloc, bytes, .{}) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    try rows.append(a, try a.dupe(t.Value, &.{ .{ .string = try a.dupe(u8, entry.name) }, .null, .{ .string = "person_count(frame)" }, .null, .{ .string = "corrupt" } }));
+                    continue;
+                },
+            };
+            const doc = parsed.value;
+            var status: []const u8 = if (doc.version != 1) "unsupported" else "unknown";
+            if (doc.version == 1) if (doc.source) |source| {
+                status = "stale";
+                if (config) |settings_key| {
+                    const current = s.identity(alloc, source, settings_key) catch null;
+                    if (current) |identity_key| if (std.mem.eql(u8, identity_key, doc.fingerprint)) {
+                        status = "valid";
+                    };
+                }
+            };
+            try rows.append(a, try a.dupe(t.Value, &.{
+                .{ .string = try a.dupe(u8, doc.name) },
+                if (doc.source) |source| .{ .string = try a.dupe(u8, source) } else .null,
+                .{ .string = "person_count(frame)" },
+                .{ .int = @intCast(doc.entries.len) },
+                .{ .string = status },
+            }));
+        }
+        const Sort = struct {
+            fn less(_: void, left: []const t.Value, right: []const t.Value) bool {
+                const names = std.mem.order(u8, left[0].string, right[0].string);
+                if (names != .eq) return names == .lt;
+                return std.mem.lessThan(u8, if (left[1] == .string) left[1].string else "", if (right[1] == .string) right[1].string else "");
+            }
+        };
+        std.mem.sort([]const t.Value, rows.items, {}, Sort.less);
+        return .{ .columns = columns, .rows = try rows.toOwnedSlice(a) };
     }
     pub fn digest(a: A, bytes: []const u8) ![]const u8 {
         var hash: [32]u8 = undefined;
@@ -116,7 +175,7 @@ pub const Store = struct {
         s.io.random(&random);
         const staging = try std.fmt.allocPrint(a, "{s}.{s}.part", .{ path, std.fmt.bytesToHex(random, .lower) });
         defer std.Io.Dir.cwd().deleteFile(s.io, staging) catch {};
-        const bytes = try std.json.Stringify.valueAlloc(a, Document{ .name = name, .fingerprint = fingerprint, .entries = entries }, .{});
+        const bytes = try std.json.Stringify.valueAlloc(a, Document{ .name = name, .source = try std.Io.Dir.cwd().realPathFileAlloc(s.io, source, a), .fingerprint = fingerprint, .entries = entries }, .{});
         if (bytes.len > 64 << 20) return error.IndexTooLarge;
         const file = try std.Io.Dir.cwd().createFile(s.io, staging, .{ .exclusive = true });
         defer file.close(s.io);
@@ -159,8 +218,16 @@ test "persistent counts reload across sessions and reject changed source or sett
     defer reader.deinit();
     reader.directory = writer.directory;
     const c = t.Control{ .io = io };
+    try std.testing.expectEqual(@as(usize, 0), (try reader.list(a, c, "model-a:confidence-a")).rows.len);
     try std.testing.expect(try reader.lookup(a, c, frame, "model-a:confidence-a") == null);
     try writer.save(a, c, "people", source, "model-a:confidence-a", result);
+    const catalog = try reader.list(a, c, "model-a:confidence-a");
+    try std.testing.expectEqual(@as(usize, 1), catalog.rows.len);
+    try std.testing.expectEqualStrings("people", catalog.rows[0][0].string);
+    try std.testing.expectEqualStrings(source, catalog.rows[0][1].string);
+    try std.testing.expectEqual(@as(i128, 2), catalog.rows[0][3].int);
+    try std.testing.expectEqualStrings("valid", catalog.rows[0][4].string);
+    try std.testing.expectEqualStrings("stale", (try reader.list(a, c, "model-b:confidence-a")).rows[0][4].string);
     // A session that already cached a miss notices a newly published index.
     try std.testing.expectEqual(@as(?u32, 2), try reader.lookup(a, c, frame, "model-a:confidence-a"));
     try std.testing.expectEqual(@as(?u32, 0), try reader.lookup(a, c, second, "model-a:confidence-a"));
@@ -177,4 +244,12 @@ test "persistent counts reload across sessions and reject changed source or sett
     try replacement.writeStreamingAll(io, "changed fixture size");
     replacement.close(io);
     try std.testing.expect(try reader.lookup(a, c, frame, "model-a:confidence-a") == null);
+    try std.testing.expectEqualStrings("stale", (try reader.list(a, c, "model-a:confidence-a")).rows[0][4].string);
+    const legacy_path = try std.fmt.allocPrint(a, "{s}/legacy.json", .{writer.directory.?});
+    const legacy = try std.Io.Dir.cwd().createFile(io, legacy_path, .{});
+    try legacy.writeStreamingAll(io, "{\"name\":\"legacy\",\"fingerprint\":\"old\",\"entries\":[]}");
+    legacy.close(io);
+    const with_legacy = try reader.list(a, c, "model-a:confidence-a");
+    try std.testing.expectEqualStrings("legacy", with_legacy.rows[0][0].string);
+    try std.testing.expectEqualStrings("unknown", with_legacy.rows[0][4].string);
 }
