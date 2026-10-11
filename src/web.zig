@@ -241,7 +241,7 @@ const Server = struct {
             var headers: std.ArrayList(std.http.Header) = .empty;
             try headers.appendSlice(a, options("application/octet-stream", .ok).extra_headers);
             try headers.append(a, .{ .name = "accept-ranges", .value = "bytes" });
-            try headers.append(a, .{ .name = "content-disposition", .value = try std.fmt.allocPrint(a, "attachment; filename=\"track-{d}-sample-{d}.bin\"", .{ f.track_id, f.frame_index }) });
+            try headers.append(a, .{ .name = "content-disposition", .value = try std.fmt.allocPrint(a, "attachment; filename=\"track-{d}-frame-{d}.bin\"", .{ f.track_id, f.frame_index }) });
             if (range != null) try headers.append(a, .{ .name = "content-range", .value = try std.fmt.allocPrint(a, "bytes {d}-{d}/{d}", .{ selected.start, selected.start + selected.length - 1, f.size }) });
             var buffer: [8192]u8 = undefined;
             var body = try request.respondStreaming(&buffer, .{ .content_length = selected.length, .respond_options = .{ .status = if (range == null) .ok else .partial_content, .keep_alive = false, .extra_headers = headers.items } });

@@ -229,9 +229,12 @@ code (`avc1`, `hvc1`, `mp4a`, etc.). Missing metadata is null. Box paths describ
 ancestry and can repeat; offsets identify individual boxes. MP4 and MOV both
 report format `mp4`.
 
-Frames contain video samples in decode order with indices starting at one per
-track. DTS begins at zero; PTS includes composition offsets. Edit lists are not
-applied. When the sync table is absent, all samples are sync samples. `frame`
+Frames appear in presentation order with `frame_index` starting at one per
+track. Indices follow increasing PTS; equal timestamps retain decode order.
+PTS includes composition offsets. DTS and encoded byte offsets still describe
+the original samples and can move backward between presentation indices.
+The graph connects points in X order, preserving each point's frame reference.
+Edit lists are not applied. When the sync table is absent, all samples are sync samples. `frame`
 is a typed lazy reference containing source, track, sample, byte range,
 timestamp, and duration. Payload bytes are not embedded in JSON. Missing sample
 locations yield null offset/frame. Web references also carry IDs and URLs.
@@ -288,6 +291,7 @@ zig build test
 
 # Browser mask decoding/scaling tests (Node.js needed only for these tests):
 node --test src/static/masks.test.cjs
+node --test src/static/graph.test.cjs
 # Optional preview interaction test (also needs Firefox):
 node src/static/masks.browser.test.cjs
 

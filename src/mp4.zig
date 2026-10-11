@@ -49,15 +49,17 @@ const IndexedTrack = struct {
     sync: ?std.AutoHashMap(u32, void),
     locations: ?[]const u64,
     anchors: []const ?usize,
-    fn get(ctx: *const anyopaque, i: usize, col: usize) V {
+    presentation_order: []const usize,
+    fn get(ctx: *const anyopaque, row: usize, col: usize) V {
         const s: *const @This() = @ptrCast(@alignCast(ctx));
+        const i = s.presentation_order[row];
         const pts = @as(f64, @floatFromInt(s.dts[i] + s.composition[i])) / s.scale;
         const duration = @as(f64, @floatFromInt(s.durations[i])) / s.scale;
         const key = if (s.sync) |sync| sync.contains(@intCast(i + 1)) else true;
         return switch (col) {
             0 => .{ .string = s.path },
             1 => if (s.id) |id| .{ .int = id } else .null,
-            2 => .{ .int = i + 1 },
+            2 => .{ .int = row + 1 },
             3 => .{ .float = @as(f64, @floatFromInt(s.dts[i])) / s.scale },
             4 => .{ .float = pts },
             5 => .{ .float = duration },
@@ -67,7 +69,7 @@ const IndexedTrack = struct {
             9 => if (s.id != null and s.locations != null) .{ .frame = .{
                 .source = s.path,
                 .track_id = s.id.?,
-                .frame_index = i + 1,
+                .frame_index = row + 1,
                 .offset = s.locations.?[i],
                 .size = s.sizes[i],
                 .pts_seconds = pts,
@@ -363,7 +365,8 @@ const Parser = struct {
                 a.* = if (anchor != i and previous != null) previous else anchor;
             }
             const indexed = try p.a.create(IndexedTrack);
-            indexed.* = .{ .path = p.name, .id = if (track.row[1] == .int) @intCast(track.row[1].int) else null, .scale = @floatFromInt(track.row[6].int), .durations = durations, .composition = composition, .dts = dts, .sizes = s.sizes, .sync = s.sync, .locations = loc, .anchors = anchors };
+            const presentation_order = try presentationOrder(p.a, p.control, dts, composition);
+            indexed.* = .{ .path = p.name, .id = if (track.row[1] == .int) @intCast(track.row[1].int) else null, .scale = @floatFromInt(track.row[6].int), .durations = durations, .composition = composition, .dts = dts, .sizes = s.sizes, .sync = s.sync, .locations = loc, .anchors = anchors, .presentation_order = presentation_order };
             try tables.append(p.a, .{ .columns = schemas.frames, .count = n, .context = indexed, .get = IndexedTrack.get });
         }
         if (tables.items.len == 0) {
@@ -374,6 +377,30 @@ const Parser = struct {
         return t.combine(p.a, tables.items);
     }
 };
+fn presentationOrder(a: A, control: t.Control, dts: []const i64, composition: []const i64) ![]const usize {
+    const order = try a.alloc(usize, dts.len);
+    errdefer a.free(order);
+    var sorted = true;
+    for (order, 0..) |*sample, i| {
+        if (i % 1024 == 0) try control.check();
+        sample.* = i;
+        if (i > 0 and dts[i] + composition[i] < dts[i - 1] + composition[i - 1]) sorted = false;
+    }
+    if (!sorted) {
+        const Context = struct {
+            dts: []const i64,
+            composition: []const i64,
+            fn less(ctx: @This(), lhs: usize, rhs: usize) bool {
+                const left = ctx.dts[lhs] + ctx.composition[lhs];
+                const right = ctx.dts[rhs] + ctx.composition[rhs];
+                return left < right or (left == right and lhs < rhs);
+            }
+        };
+        std.mem.sort(usize, order, Context{ .dts = dts, .composition = composition }, Context.less);
+    }
+    try control.check();
+    return order;
+}
 fn expand(a: A, runs: []const Run, count: usize) ![]const i64 {
     const result = try a.alloc(i64, count);
     errdefer a.free(result);
@@ -392,4 +419,46 @@ test "sample expansion checks counts" {
     defer a.free(values);
     try std.testing.expectEqualSlices(i64, &.{ -1, -1 }, values);
     try std.testing.expectError(error.SampleCountMismatch, expand(std.heap.page_allocator, &.{.{ .count = 3, .value = 1 }}, 2));
+}
+test "presentation indices retain exact decode sample metadata and anchors" {
+    const a = std.testing.allocator;
+    const dts = [_]i64{ 0, 1, 2, 3, 4 };
+    const composition = [_]i64{ 2, 3, 0, -2, -2 };
+    const order = try presentationOrder(a, .{ .io = std.testing.io }, &dts, &composition);
+    defer a.free(order);
+    try std.testing.expectEqualSlices(usize, &.{ 3, 0, 2, 4, 1 }, order);
+    var sync = std.AutoHashMap(u32, void).init(a);
+    defer sync.deinit();
+    try sync.put(1, {});
+    const track = IndexedTrack{
+        .path = "fixture.mp4",
+        .id = 1,
+        .scale = 1,
+        .durations = &.{ 1, 2, 3, 4, 5 },
+        .composition = &composition,
+        .dts = &dts,
+        .sizes = &.{ 10, 20, 30, 40, 50 },
+        .sync = sync,
+        .locations = &.{ 100, 200, 300, 400, 500 },
+        .anchors = &.{ 0, 0, 0, 0, 0 },
+        .presentation_order = order,
+    };
+    for (order, 0..) |sample, row| {
+        const frame = IndexedTrack.get(&track, row, 9).frame;
+        try std.testing.expectEqual(@as(i128, @intCast(row + 1)), IndexedTrack.get(&track, row, 2).int);
+        try std.testing.expectEqual(row + 1, frame.frame_index);
+        try std.testing.expectEqual(track.locations.?[sample], frame.offset);
+        try std.testing.expectEqual(track.sizes[sample], frame.size);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(dts[sample])), IndexedTrack.get(&track, row, 3).float);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(dts[sample] + composition[sample])), frame.pts_seconds);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(track.durations[sample])), frame.duration_seconds);
+        try std.testing.expectEqual(sample == 0, frame.keyframe);
+        try std.testing.expectEqual(@as(f64, 2), frame.decode_start);
+    }
+}
+test "presentation order without composition offsets matches decode order" {
+    const a = std.testing.allocator;
+    const order = try presentationOrder(a, .{ .io = std.testing.io }, &.{ 0, 10, 20 }, &.{ 0, 0, 0 });
+    defer a.free(order);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, order);
 }

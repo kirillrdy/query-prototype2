@@ -9,8 +9,10 @@ window.ResultGraph = (() => {
     return Number(value.toPrecision(5)).toLocaleString("en-US", { maximumFractionDigits: 8 });
   };
   function defaults(columns) {
+    const score = columns.find(column => /motion|score/i.test(column));
+    if (!score && columns.includes("frame_index") && columns.includes("pts_seconds")) return { x: "frame_index", y: "pts_seconds" };
     const x = ["pts_seconds", "dts_seconds", "frame_index"].find(column => columns.includes(column)) || "";
-    const y = columns.find(column => /motion|score/i.test(column) && column !== x) || columns.find(column => column !== x) || columns[0] || "";
+    const y = (score !== x && score) || columns.find(column => column !== x) || columns[0] || "";
     return { x: y === x ? "" : x, y };
   }
   function model(result, x, y) {
@@ -23,6 +25,16 @@ window.ResultGraph = (() => {
       return finite(px) && finite(py) ? { x: px, y: py, index, group } : null;
     });
     const plotted = points.filter(Boolean);
+    // Keep gaps and source/track boundaries, but draw each line from left to
+    // right. Preserve row indices on the points for frame inspection.
+    const segments = [];
+    let segment = null;
+    for (const point of points) {
+      if (!point) { segment = null; continue; }
+      if (!segment || segment[0].group !== point.group) { segment = []; segments.push(segment); }
+      segment.push(point);
+    }
+    for (const segment of segments) segment.sort((a, b) => a.x - b.x || a.index - b.index);
     const extent = field => {
       let min = Infinity, max = -Infinity;
       for (const point of plotted) { min = Math.min(min, point[field]); max = Math.max(max, point[field]); }
@@ -32,7 +44,7 @@ window.ResultGraph = (() => {
       }
       return [min, max];
     };
-    return { points, plotted, xRange: extent("x"), yRange: extent("y") };
+    return { points, plotted, segments, xRange: extent("x"), yRange: extent("y") };
   }
   function render(container, result, x, y, inspect) {
     container.replaceChildren();
@@ -66,11 +78,9 @@ window.ResultGraph = (() => {
     element("text", { x: left + plotWidth / 2, y: height - 10, "text-anchor": "middle", class: "graph-axis-label" }, x || "Row number");
     element("text", { transform: `translate(18 ${top + plotHeight / 2}) rotate(-90)`, "text-anchor": "middle", class: "graph-axis-label" }, y);
     // A missing value breaks the line, rather than treating a null score as zero.
-    let path = "", previous = null;
-    for (const point of chart.points) {
-      if (!point) { previous = null; continue; }
-      path += `${previous && previous.group === point.group ? "L" : "M"}${px(point.x)},${py(point.y)} `;
-      previous = point;
+    let path = "";
+    for (const segment of chart.segments) {
+      segment.forEach((point, index) => { path += `${index ? "L" : "M"}${px(point.x)},${py(point.y)} `; });
     }
     element("path", { d: path, class: "graph-line" });
     for (const point of chart.plotted) {
