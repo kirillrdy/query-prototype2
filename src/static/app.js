@@ -233,7 +233,12 @@ async function runQuery() {
         const first = result.rows.length === 0;
         for (const row of event.rows) { const index = result.rows.length; result.rows.push(row); const frames = frameValues(row); if (frames.length) selection.add(index); for (const frame of frames) if (!frameRows.has(frame.id)) frameRows.set(frame.id, row); }
         if (firstRow == null && event.rows.length) firstRow = performance.now() - started;
-        renderResults(); updateQueue(false); $("result-note").textContent = "Receiving rows…";
+        renderResults(); updateQueue(false);
+        const note = $("result-note");
+        if (!note.querySelector(".spinner")) {
+          const spinner = text("span", "", "spinner"); spinner.setAttribute("aria-hidden", "true");
+          note.replaceChildren(spinner, text("span", "Receiving rows", "sr-only"));
+        }
         message(`${result.rows.length} rows received${timing()}…`, "busy");
         if (first && queue.length) show(queue[0], true).catch(error => { if (version === generation) message(`Preview: ${error.message}`, "error"); });
       } else if (event.type === "done") {

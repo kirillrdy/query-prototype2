@@ -11,6 +11,7 @@
   </details>
   <div id="sources" class="sources" aria-label="Loaded videos"></div>
  </div>
+ <section class="query-panel" aria-label="Query editor">
  <section class="editor-panel"><div class="section-head"><label for="sql">SQL query</label><span class="shortcut">⌘ / Ctrl + Enter</span></div>
  <textarea id="sql" spellcheck="false">SELECT frame, path, frame_index, pts_seconds
 FROM frames
@@ -18,6 +19,7 @@ LIMIT 48</textarea>
  <div class="query-footer"><div class="examples"><button data-example="mixed">Frames + fields</button><button data-example="motion">Motion</button><button data-example="people">People</button><button data-example="sam3">SAM3 masks</button><button data-example="keyframes">Keyframes</button><button data-example="tracks">Tracks</button></div><div class="query-actions"><button id="cancel-query" hidden>Cancel</button><button id="run" class="primary">Run query</button></div></div>
  </section>
  <div id="message" role="status" aria-live="polite" class="message">Open a video to start exploring.</div>
+ </section>
  <section class="result-panel"><div class="result-head"><h2>Results <span id="row-count" class="count">0</span></h2><div class="result-tools"><span id="result-note" class="muted">Text fields appear here. Frame values open in the player.</span><div class="view-toggle" role="tablist" aria-label="Result view"><button id="view-table" role="tab" aria-selected="true" aria-controls="table-view">Table</button><button id="view-graph" role="tab" aria-selected="false" aria-controls="graph-view" tabindex="-1">Graph</button><button id="view-player" role="tab" aria-selected="false" aria-controls="player-view" tabindex="-1">Player</button></div></div></div>
  <div id="table-view" class="table-scroll" role="tabpanel" aria-labelledby="view-table"><table id="results"><thead></thead><tbody></tbody></table><div id="empty" class="empty"><span class="empty-icon">▤</span><h3>Make your first selection</h3><p>Choose frames, timestamps, or metadata with a query.</p></div></div>
  <div id="graph-view" class="graph-view" role="tabpanel" aria-labelledby="view-graph" hidden>
