@@ -75,3 +75,32 @@ test "CPU object detection runs without a SAM3 worker" {
     try std.testing.expectEqual(@as(usize, 1), result.rows.len);
     try std.testing.expect(result.rows[0][0].int >= 0 and result.rows[0][1].int >= 0);
 }
+
+test "person-count index serves fresh sessions and falls back outside its frame range" {
+    const path = t.env("BQUERY_TEST_DETECTION_VIDEO") orelse return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const c = t.Control{ .io = io };
+    const tables = try mp4.read(a, c, path, path, "frames");
+    var writer = try video.Runtime.init(std.testing.allocator, io);
+    defer writer.deinit();
+    writer.person_indexes.directory = try std.fmt.allocPrint(a, "{s}/indexes", .{writer.temp});
+    const query = try engine.parse(a, "SELECT frame_index, person_count(frame) AS people FROM frames WHERE frame_index <= 3 ORDER BY frame_index");
+    const baseline = try engine.execute(a, c, query, tables, try writer.functions(a), null);
+    var build = try engine.parse(a, "CREATE INDEX people ON frames('fixture.mp4') (person_count(frame)) WHERE frame_index <= 3");
+    build.filename = path;
+    const built = try engine.execute(a, c, build, tables, try writer.functions(a), null);
+    try std.testing.expectEqual(@as(i128, @intCast(baseline.rows.len)), built.rows[0][1].int);
+    var reader = try video.Runtime.init(std.testing.allocator, io);
+    defer reader.deinit();
+    reader.person_indexes.directory = writer.person_indexes.directory;
+    const indexed = try engine.execute(a, c, query, tables, try reader.functions(a), null);
+    try std.testing.expectEqual(baseline.rows.len, indexed.rows.len);
+    for (baseline.rows, indexed.rows) |before, after| try std.testing.expectEqual(before[1].int, after[1].int);
+    try std.testing.expect(reader.detector == null);
+    const missing = try engine.parse(a, "SELECT person_count(frame) AS people FROM frames WHERE frame_index = 4 LIMIT 1");
+    _ = try engine.execute(a, c, missing, tables, try reader.functions(a), null);
+    try std.testing.expect(reader.detector != null);
+}

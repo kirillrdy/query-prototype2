@@ -69,6 +69,7 @@ pub const Expr = struct {
 pub const Selection = struct { expression: *Expr, name: []const u8 };
 pub const Predicate = struct { left: *Expr, right: ?*Expr = null, upper: ?*Expr = null, op: enum { eq, ne, lt, le, gt, ge, is_null, is_not_null, between, not_between } };
 pub const Query = struct {
+    create_index: ?[]const u8 = null,
     table: []const u8 = "",
     filename: ?[]const u8 = null,
     subquery: ?*Query = null,
@@ -182,35 +183,56 @@ const Parser = struct {
         defer p.depth -= 1;
         if (p.depth > 32) return error.QueryNestingLimit;
         var q: Query = .{};
-        try p.take("select");
-        if (p.accept("*")) q.star = true else {
-            var selects: std.ArrayList(Selection) = .empty;
-            while (true) {
-                const e = try p.expression(0);
-                const name = if (p.accept("as")) try p.identifier() else try e.label(p.a);
-                for (selects.items) |s| {
-                    if (std.mem.eql(u8, s.name, name)) return error.DuplicateSelectedColumn;
-                }
-                try selects.append(p.a, .{ .expression = e, .name = name });
-                if (!p.accept(",")) break;
-            }
-            q.selects = try selects.toOwnedSlice(p.a);
-        }
-        try p.take("from");
-        if (p.accept("(")) {
-            const inner = try p.a.create(Query);
-            inner.* = try p.query();
-            q.subquery = inner;
-            try p.take(")");
-            _ = p.accept("as");
-            _ = try p.identifier();
-        } else {
+        if (p.accept("create")) {
+            if (p.depth != 1) return error.UnsupportedIndex;
+            try p.take("index");
+            q.create_index = try p.identifier();
+            try p.take("on");
             q.table = try p.identifier();
+            if (!std.mem.eql(u8, q.table, "frames")) return error.UnsupportedIndex;
+            try p.take("(");
+            if (p.i >= p.tokens.len or !p.tokens[p.i].quoted or p.tokens[p.i].text.len == 0 or std.mem.indexOfScalar(u8, p.tokens[p.i].text, 0) != null) return error.InvalidTableSource;
+            q.filename = p.tokens[p.i].text;
+            p.i += 1;
+            try p.take(")");
+            try p.take("(");
+            const expr = try p.expression(0);
+            if (expr.kind != .call or !std.mem.eql(u8, expr.name, "person_count") or expr.args.len != 1 or expr.args[0].kind != .column or !std.mem.eql(u8, expr.args[0].name, "frame")) return error.UnsupportedIndexExpression;
+            try p.take(")");
+            const frame = try p.a.create(Expr);
+            frame.* = .{ .kind = .column, .name = "frame" };
+            q.selects = try p.a.dupe(Selection, &.{ .{ .expression = frame, .name = "frame" }, .{ .expression = expr, .name = "people" } });
+        } else {
+            try p.take("select");
+            if (p.accept("*")) q.star = true else {
+                var selects: std.ArrayList(Selection) = .empty;
+                while (true) {
+                    const e = try p.expression(0);
+                    const name = if (p.accept("as")) try p.identifier() else try e.label(p.a);
+                    for (selects.items) |s| {
+                        if (std.mem.eql(u8, s.name, name)) return error.DuplicateSelectedColumn;
+                    }
+                    try selects.append(p.a, .{ .expression = e, .name = name });
+                    if (!p.accept(",")) break;
+                }
+                q.selects = try selects.toOwnedSlice(p.a);
+            }
+            try p.take("from");
             if (p.accept("(")) {
-                if (p.i >= p.tokens.len or !p.tokens[p.i].quoted or p.tokens[p.i].text.len == 0 or std.mem.indexOfScalar(u8, p.tokens[p.i].text, 0) != null) return error.InvalidTableSource;
-                q.filename = p.tokens[p.i].text;
-                p.i += 1;
-                if (!p.accept(")")) return error.InvalidTableSource;
+                const inner = try p.a.create(Query);
+                inner.* = try p.query();
+                q.subquery = inner;
+                try p.take(")");
+                _ = p.accept("as");
+                _ = try p.identifier();
+            } else {
+                q.table = try p.identifier();
+                if (p.accept("(")) {
+                    if (p.i >= p.tokens.len or !p.tokens[p.i].quoted or p.tokens[p.i].text.len == 0 or std.mem.indexOfScalar(u8, p.tokens[p.i].text, 0) != null) return error.InvalidTableSource;
+                    q.filename = p.tokens[p.i].text;
+                    p.i += 1;
+                    if (!p.accept(")")) return error.InvalidTableSource;
+                }
             }
         }
         if (p.accept("where")) {
@@ -259,6 +281,12 @@ const Parser = struct {
             } else {
                 q.offset = n;
                 offset_seen = true;
+            }
+        }
+        if (q.create_index != null) {
+            if (q.order.len != 0 or q.limit != null or q.offset != 0) return error.UnsupportedIndex;
+            for (q.predicates) |pred| {
+                if (pred.left.kind != .column or (if (pred.right) |r| r.kind != .literal else false) or (if (pred.upper) |r| r.kind != .literal else false)) return error.UnsupportedIndexPredicate;
             }
         }
         return q;
@@ -371,4 +399,18 @@ test "file-backed tables preserve quoted paths through subqueries" {
     for ([_][]const u8{ "frames()", "frames('')", "frames(42)", "frames(null)", "frames('a', 'b')" }) |source| {
         try std.testing.expectError(error.InvalidTableSource, parse(a, try std.fmt.allocPrint(a, "SELECT * FROM {s}", .{source})));
     }
+}
+
+test "CREATE INDEX accepts frame filters and rejects unsupported expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const q = try parse(a, "CREATE INDEX people_idx ON frames('it''s.mp4') (person_count(frame)) WHERE frame_index <= 100;");
+    try std.testing.expectEqualStrings("people_idx", q.create_index.?);
+    try std.testing.expectEqualStrings("it's.mp4", q.sourceFile().?);
+    try std.testing.expect(q.uses(&.{"person_count"}));
+    try std.testing.expectEqual(@as(usize, 1), q.predicates.len);
+    try std.testing.expectError(error.UnsupportedIndexExpression, parse(a, "CREATE INDEX bad ON frames('video.mp4') (motion(frame, frame))"));
+    try std.testing.expectError(error.UnsupportedIndexPredicate, parse(a, "CREATE INDEX bad ON frames('video.mp4') (person_count(frame)) WHERE person_count(frame) > 0"));
+    try std.testing.expectError(error.UnsupportedIndex, parse(a, "CREATE INDEX bad ON frames('video.mp4') (person_count(frame)) LIMIT 100"));
 }

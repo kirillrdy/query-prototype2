@@ -10,6 +10,8 @@ pub const Function = struct {
     context: *anyopaque,
     evaluate: *const fn (*anyopaque, A, t.Control, []const V) anyerror!V,
     prepare: ?*const fn (*anyopaque, A, t.Control, []const []const V) anyerror!void = null,
+    index_identity: ?*const fn (*anyopaque, A, []const u8) anyerror![]const u8 = null,
+    create_index: ?*const fn (*anyopaque, A, t.Control, []const u8, []const u8, []const u8, t.Result) anyerror!t.Result = null,
 };
 pub const Functions = std.StringHashMap(Function);
 pub const Emit = struct { context: *anyopaque, send: *const fn (*anyopaque, t.Result, bool) anyerror!void };
@@ -249,6 +251,21 @@ fn orderRows(e: *Eval, selects: []const p.Selection, orders: []const p.Order) ![
 }
 pub fn execute(a: A, control: t.Control, q: Query, tables: t.Tables, functions: Functions, emit: ?Emit) anyerror!t.Result {
     try control.check();
+    if (q.create_index) |name| {
+        const function = functions.get("person_count") orelse return error.UnknownFunction;
+        const save = function.create_index orelse return error.UnsupportedIndex;
+        const identity = function.index_identity orelse return error.UnsupportedIndex;
+        const fingerprint = try identity(function.context, a, q.filename.?);
+        var select = q;
+        select.create_index = null;
+        const values = try execute(a, control, select, tables, functions, null);
+        const result = try save(function.context, a, control, name, q.filename.?, fingerprint, values);
+        if (emit) |out| {
+            try out.send(out.context, .{ .columns = result.columns, .rows = &.{} }, true);
+            try out.send(out.context, result, false);
+        }
+        return result;
+    }
     var table: t.Table = undefined;
     if (q.subquery) |inner| {
         const r = try a.create(t.Result);

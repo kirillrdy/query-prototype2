@@ -154,6 +154,44 @@ Set `BQUERY_PROFILE_SAM3=1` when starting the CLI or server to log per-frame
 model loading, frame decoding, image encoding, text encoding, mask decoding,
 and RLE timings. The first inference includes model and GPU initialization.
 
+### Persistent person-count indexes
+
+Build a reusable index in the SQL console, with `-c`, or in the web query editor:
+
+```sql
+CREATE INDEX people_idx
+ON frames('/home/kirillvr/holes_3min.mp4') (person_count(frame))
+WHERE frame_index <= 100;
+```
+
+Omit `WHERE` to index the entire video. Index filters accept frame metadata
+predicates; inference expressions, ORDER BY, and pagination are not supported
+in index definitions. Building the index runs detection once per covered frame
+and returns its name and indexed frame count. Running the same definition again
+atomically replaces the named index for that video.
+
+Normal queries automatically use saved counts in both projections and filters:
+
+```sql
+SELECT frame, path, pts_seconds, person_count(frame) AS people
+FROM frames('/home/kirillvr/holes_3min.mp4')
+WHERE frame_index <= 100 AND person_count(frame) > 0
+ORDER BY path, pts_seconds;
+```
+
+Counts persist across CLI, REPL, and server restarts. Partial indexes can cover
+different frame ranges; uncovered frames use normal inference. Existing sessions
+notice newly published indexes. Indexed counts need no decoder or detector.
+Changes to the source's size or modification time, the configured model's path,
+size or modification time, or the confidence threshold invalidate saved counts;
+rebuild the index to cover the new configuration. The server still requires a
+restart when a loaded source changes on disk.
+
+Indexes are stored under `$XDG_CACHE_HOME/binaryquery/indexes` (default
+`~/.cache/binaryquery/indexes`); `BQUERY_INDEX_CACHE` overrides this directory.
+Only `person_count(frame)` is supported currently. The index stores computed
+values to avoid repeated inference; metadata scans and sorting still run.
+
 ### Motion and windows
 
 ```sql

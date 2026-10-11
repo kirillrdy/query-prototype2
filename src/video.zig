@@ -21,6 +21,7 @@ pub const Segmentation = struct { count: usize, score: f32, width: usize, height
 const Signature = struct { size: u64, mtime: i96 };
 const SamCache = struct { arena: std.heap.ArenaAllocator, result: Segmentation };
 const Counts = [80]u32;
+const person_index = @import("person_index.zig");
 const SamTiming = struct {
     io: std.Io,
     frame_index: usize,
@@ -50,6 +51,8 @@ pub const Runtime = struct {
     features: std.StringHashMap([]f32),
     results: std.StringHashMap(SamCache),
     detector: ?ort.Detector = null,
+    detector_key: ?[]const u8 = null,
+    person_indexes: person_index.Store,
     counts: std.StringHashMap(Counts),
     pub fn init(a: A, io: std.Io) !Runtime {
         var random: [16]u8 = undefined;
@@ -57,13 +60,15 @@ pub const Runtime = struct {
         const temp = try std.fmt.allocPrint(a, "/tmp/binaryquery-{s}", .{std.fmt.bytesToHex(random, .lower)});
         errdefer a.free(temp);
         try std.Io.Dir.cwd().createDirPath(io, temp);
-        return .{ .a = a, .io = io, .temp = temp, .signatures = .init(a), .indices = .init(a), .features = .init(a), .results = .init(a), .counts = .init(a) };
+        return .{ .a = a, .io = io, .temp = temp, .signatures = .init(a), .indices = .init(a), .features = .init(a), .results = .init(a), .counts = .init(a), .person_indexes = .init(a, io) };
     }
     pub fn deinit(r: *Runtime) void {
         if (r.embedding) |*e| e.deinit();
         if (r.embedding_key) |key| r.a.free(key);
         if (r.model) |*m| m.deinit();
         if (r.detector) |*d| d.deinit();
+        if (r.detector_key) |key| r.a.free(key);
+        r.person_indexes.deinit();
         var features = r.features.iterator();
         while (features.next()) |entry| {
             r.a.free(entry.key_ptr.*);
@@ -101,6 +106,8 @@ pub const Runtime = struct {
             try f.put(entry[0], .{ .arity = entry[1], .context = r, .evaluate = entry[2] });
         }
         f.getPtr("motion").?.prepare = prepareMotion;
+        f.getPtr("person_count").?.create_index = createPersonIndex;
+        f.getPtr("person_count").?.index_identity = personIndexIdentity;
         return f;
     }
     pub fn checkSource(r: *Runtime, frame: t.Frame) !void {
@@ -367,13 +374,23 @@ pub const Runtime = struct {
     fn detect(r: *Runtime, a: A, control: t.Control, f: t.Frame) !Counts {
         try r.checkSource(f);
         try control.check();
-        const key = try id(a, f);
-        if (r.counts.get(key)) |cached| return cached;
         const threshold = try confidence("BQUERY_DETECTION_CONFIDENCE", 0.25);
+        const config = try person_index.Store.settings(a, r.io, threshold);
+        const key = try std.fmt.allocPrint(a, "{s}:{s}", .{ try id(a, f), config });
+        if (r.counts.get(key)) |cached| return cached;
+        if (r.detector_key) |old| {
+            if (!std.mem.eql(u8, old, config)) {
+                if (r.detector) |*d| d.deinit();
+                r.detector = null;
+                r.a.free(old);
+                r.detector_key = null;
+            }
+        }
         if (r.detector == null) {
             const model = if (t.env("BQUERY_DETECTION_MODEL")) |path_| path_ else try r.modelPath(a, control);
             if (!std.ascii.endsWithIgnoreCase(model, ".onnx")) return error.ExpectedONNXModel;
             r.detector = try ort.Detector.open(a, r.io, model, try @import("detection_assets.zig").runtimePath(r, a, control));
+            r.detector_key = try r.a.dupe(u8, config);
         }
         const png = try r.decode(a, control, f, .detection);
         defer std.Io.Dir.cwd().deleteFile(r.io, png) catch {};
@@ -441,7 +458,26 @@ fn segmentScore(ctx: *anyopaque, a: A, control: t.Control, args: []const V) !V {
     return .{ .float = (try runtime(ctx).segment(a, control, try asFrame(args[0]), try prompt(args[1]))).score };
 }
 fn personCount(ctx: *anyopaque, a: A, control: t.Control, args: []const V) !V {
-    return objectCount(ctx, a, control, &.{ args[0], .{ .string = "person" } });
+    if (args[0] == .null) return .null;
+    const r = runtime(ctx);
+    const frame = try asFrame(args[0]);
+    try r.checkSource(frame);
+    try control.check();
+    const config = try person_index.Store.settings(a, r.io, try confidence("BQUERY_DETECTION_CONFIDENCE", 0.25));
+    if (try r.person_indexes.lookup(a, control, frame, config)) |count| return .{ .int = count };
+    return .{ .int = (try r.detect(a, control, frame))[0] };
+}
+fn personIndexIdentity(ctx: *anyopaque, a: A, source: []const u8) ![]const u8 {
+    const r = runtime(ctx);
+    const config = try person_index.Store.settings(a, r.io, try confidence("BQUERY_DETECTION_CONFIDENCE", 0.25));
+    return r.person_indexes.identity(a, source, config);
+}
+fn createPersonIndex(ctx: *anyopaque, a: A, control: t.Control, name: []const u8, source: []const u8, fingerprint: []const u8, values: t.Result) !t.Result {
+    const r = runtime(ctx);
+    const config = try person_index.Store.settings(a, r.io, try confidence("BQUERY_DETECTION_CONFIDENCE", 0.25));
+    if (!std.mem.eql(u8, fingerprint, try r.person_indexes.identity(a, source, config))) return error.IndexSourceChanged;
+    try r.person_indexes.save(a, control, name, source, config, values);
+    return .{ .columns = &.{ "index", "indexed_frames" }, .rows = try a.dupe([]const V, &.{try a.dupe(V, &.{ .{ .string = name }, .{ .int = @intCast(values.rows.len) } })}) };
 }
 fn objectCount(ctx: *anyopaque, a: A, control: t.Control, args: []const V) !V {
     if (args[0] == .null or args[1] == .null) return .null;
