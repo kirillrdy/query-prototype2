@@ -3,6 +3,35 @@ const t = @import("types.zig");
 const mp4 = @import("mp4.zig");
 const engine = @import("engine.zig");
 const video = @import("video.zig");
+test "batched motion matches independent exact-sample decoding across a paginated window" {
+    const path = t.env("BQUERY_TEST_MOTION_VIDEO") orelse return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = t.Control{ .io = std.testing.io };
+    const tables = try mp4.read(a, c, path, path, "frames");
+    const count = tables.get("frames").?.count;
+    if (count < 4) return error.SkipZigTest;
+    const sql = try std.fmt.allocPrint(a, "SELECT frame_index, motion(frame, LAG(frame) OVER (PARTITION BY path, track_id ORDER BY pts_seconds, frame_index)) AS score FROM frames ORDER BY path, track_id, pts_seconds LIMIT 8 OFFSET {d}", .{@max(1, count / 2)});
+    const query = try engine.parse(a, sql);
+    var baseline = try video.Runtime.init(std.testing.allocator, c.io);
+    defer baseline.deinit();
+    var functions = try baseline.functions(a);
+    functions.getPtr("motion").?.prepare = null;
+    const expected = try engine.execute(a, c, query, tables, functions, null);
+    var batched = try video.Runtime.init(std.testing.allocator, c.io);
+    defer batched.deinit();
+    const actual = try engine.execute(a, c, query, tables, try batched.functions(a), null);
+    try std.testing.expect(actual.rows.len > 0);
+    try std.testing.expectEqual(expected.rows.len, actual.rows.len);
+    for (expected.rows, actual.rows) |old, new| {
+        try std.testing.expectEqual(old[0].int, new[0].int);
+        try std.testing.expectEqual(old[1], new[1]);
+    }
+    // Repeat with cached grayscale buffers and the same frame-position index.
+    const cached = try engine.execute(a, c, query, tables, try batched.functions(a), null);
+    for (actual.rows, cached.rows) |cold, warm| try std.testing.expectEqual(cold[1], warm[1]);
+}
 test "SAM3 directly segments an exact video sample" {
     const path = t.env("BQUERY_TEST_SAM3_VIDEO") orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

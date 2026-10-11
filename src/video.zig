@@ -84,6 +84,7 @@ pub const Runtime = struct {
         inline for (.{ .{ "motion", 2, motion }, .{ "person_count", 1, personCount }, .{ "object_count", 2, objectCount }, .{ "sam3", 2, segmentMasks }, .{ "sam3_count", 2, segmentCount }, .{ "sam3_score", 2, segmentScore } }) |entry| {
             try f.put(entry[0], .{ .arity = entry[1], .context = r, .evaluate = entry[2] });
         }
+        f.getPtr("motion").?.prepare = prepareMotion;
         return f;
     }
     pub fn checkSource(r: *Runtime, frame: t.Frame) !void {
@@ -191,6 +192,90 @@ pub const Runtime = struct {
         try r.checkSource(f);
         try std.Io.Dir.cwd().rename(staging, .cwd(), dest, r.io);
         return dest;
+    }
+    fn prepareGray(r: *Runtime, a: A, control: t.Control, frames: []const t.Frame) !void {
+        var needed: std.ArrayList(t.Frame) = .empty;
+        var seen = std.StringHashMap(void).init(a);
+        for (frames) |f| {
+            try control.check();
+            try r.checkSource(f);
+            const dest = try r.path(a, f, .gray);
+            if (std.Io.Dir.cwd().access(r.io, dest, .{})) |_| continue else |_| {}
+            if (seen.contains(dest)) continue;
+            try seen.put(dest, {});
+            try needed.append(a, f);
+        }
+        const Group = struct {
+            fn start(f: t.Frame) f64 {
+                return if (f.seekable) @max(0, f.decode_start - 0.000001) else 0;
+            }
+            fn same(lhs: t.Frame, rhs: t.Frame) bool {
+                return std.mem.eql(u8, lhs.source, rhs.source) and lhs.track_id == rhs.track_id and start(lhs) == start(rhs);
+            }
+            fn less(_: void, lhs: t.Frame, rhs: t.Frame) bool {
+                const source = std.mem.order(u8, lhs.source, rhs.source);
+                if (source != .eq) return source == .lt;
+                if (lhs.track_id != rhs.track_id) return lhs.track_id < rhs.track_id;
+                if (start(lhs) != start(rhs)) return start(lhs) < start(rhs);
+                return lhs.pts_seconds < rhs.pts_seconds or (lhs.pts_seconds == rhs.pts_seconds and lhs.frame_index < rhs.frame_index);
+            }
+        };
+        std.mem.sort(t.Frame, needed.items, {}, Group.less);
+        var first: usize = 0;
+        while (first < needed.items.len) {
+            try control.check();
+            var end = first + 1;
+            while (end < needed.items.len and Group.same(needed.items[first], needed.items[end])) : (end += 1) {}
+            const group = needed.items[first..end];
+            // Probe the last requested picture first to populate the encoded
+            // byte-position index for earlier pictures in the same seek range.
+            var last = group[group.len - 1];
+            last.keyframe = false;
+            _ = try r.ordinal(a, control, last);
+            const Picture = struct {
+                frame: t.Frame,
+                ordinal: usize,
+                fn less(_: void, lhs: @This(), rhs: @This()) bool {
+                    return lhs.ordinal < rhs.ordinal;
+                }
+            };
+            const pictures = try a.alloc(Picture, group.len);
+            for (group, pictures) |f, *picture| {
+                var full = f;
+                full.keyframe = false;
+                picture.* = .{ .frame = f, .ordinal = try r.ordinal(a, control, full) };
+            }
+            std.mem.sort(Picture, pictures, {}, Picture.less);
+            var filter: std.Io.Writer.Allocating = .init(a);
+            try filter.writer.writeAll("select=");
+            for (pictures, 0..) |picture, i| {
+                if (i > 0) try filter.writer.writeByte('+');
+                try filter.writer.print("eq(n\\,{d})", .{picture.ordinal});
+            }
+            try filter.writer.writeAll(",scale=160:90,format=gray");
+            var args: std.ArrayList([]const u8) = .empty;
+            try args.appendSlice(a, &.{ "ffmpeg", "-v", "error", "-nostdin", "-ignore_editlist", "1" });
+            const start = Group.start(group[0]);
+            if (start > 0) try args.appendSlice(a, &.{ "-ss", try std.fmt.allocPrint(a, "{d:.6}", .{start}), "-seek_timestamp", "1", "-noaccurate_seek" });
+            try args.appendSlice(a, &.{ "-i", group[0].source, "-map", try std.fmt.allocPrint(a, "0:i:{d}", .{group[0].track_id}), "-an", "-vf", try filter.toOwnedSlice(), "-fps_mode", "vfr", "-frames:v", try std.fmt.allocPrint(a, "{d}", .{pictures.len}), "-c:v", "rawvideo", "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1" });
+            const pixels = 160 * 90;
+            const bytes = try r.command(a, control, args.items, pictures.len * pixels + 1);
+            if (bytes.len != pictures.len * pixels) return error.InvalidGrayBuffer;
+            for (pictures, 0..) |picture, i| {
+                try control.check();
+                try r.checkSource(picture.frame);
+                const dest = try r.path(a, picture.frame, .gray);
+                const staging = try std.fmt.allocPrint(a, "{s}.part", .{dest});
+                defer std.Io.Dir.cwd().deleteFile(r.io, staging) catch {};
+                {
+                    const file = try std.Io.Dir.cwd().createFile(r.io, staging, .{});
+                    defer file.close(r.io);
+                    try file.writeStreamingAll(r.io, bytes[i * pixels ..][0..pixels]);
+                }
+                try std.Io.Dir.cwd().rename(staging, .cwd(), dest, r.io);
+            }
+            first = end;
+        }
     }
     fn segment(r: *Runtime, a: A, control: t.Control, f: t.Frame, phrase: []const u8) !Segmentation {
         try control.check();
@@ -356,6 +441,15 @@ fn motion(ctx: *anyopaque, a: A, control: t.Control, args: []const V) !V {
     const bytes_a = try std.Io.Dir.cwd().readFileAlloc(r.io, path_a, a, .limited(160 * 90 + 1));
     const bytes_b = try std.Io.Dir.cwd().readFileAlloc(r.io, path_b, a, .limited(160 * 90 + 1));
     return .{ .float = try difference(bytes_a, bytes_b) };
+}
+fn prepareMotion(ctx: *anyopaque, a: A, control: t.Control, rows: []const []const V) !void {
+    var frames: std.ArrayList(t.Frame) = .empty;
+    for (rows) |args| {
+        if (args[0] == .null or args[1] == .null) continue;
+        try frames.append(a, try asFrame(args[0]));
+        try frames.append(a, try asFrame(args[1]));
+    }
+    try runtime(ctx).prepareGray(a, control, frames.items);
 }
 pub fn difference(a: []const u8, b: []const u8) !f64 {
     if (a.len != 160 * 90 or b.len != a.len) return error.InvalidGrayBuffer;

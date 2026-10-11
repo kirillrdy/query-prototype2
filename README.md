@@ -146,6 +146,11 @@ decoded as lossless 160 × 90 grayscale buffers:
 `sum(abs(a - b)) / (160 * 90 * 255)`. Zero means identical buffers; one means
 maximal difference. Lighting and camera movement also affect the score. Null
 arguments return null. LAG alone moves frame references without decoding.
+Paginated window queries prepare motion inputs in batches of up to 32 output
+rows. Each decode range reuses its encoded frame-position index, and one FFmpeg
+process produces the requested lossless grayscale frames. The preceding LAG
+frame is included even when it lies before OFFSET. Cached buffers are reused
+by later queries.
 
 `LAG(value [, offset [, default]]) OVER (...)` returns an earlier value from the
 same partition. Offset defaults to one, may be an expression, and must be a
@@ -300,4 +305,6 @@ node src/static/masks.browser.test.cjs
 # Optional real-model checks (GPU required for SAM3):
 BQUERY_TEST_SAM3_VIDEO=/path/to/video.mp4 zig build test
 BQUERY_TEST_DETECTION_VIDEO=/path/to/video.mp4 zig build test
+# Optional batched-motion equivalence check (needs FFmpeg/FFprobe):
+BQUERY_TEST_MOTION_VIDEO=/path/to/video.mp4 zig build test
 ```

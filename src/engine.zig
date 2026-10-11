@@ -5,7 +5,12 @@ pub const parse = p.parse;
 pub const Query = p.Query;
 const A = std.mem.Allocator;
 const V = t.Value;
-pub const Function = struct { arity: usize, context: *anyopaque, evaluate: *const fn (*anyopaque, A, t.Control, []const V) anyerror!V };
+pub const Function = struct {
+    arity: usize,
+    context: *anyopaque,
+    evaluate: *const fn (*anyopaque, A, t.Control, []const V) anyerror!V,
+    prepare: ?*const fn (*anyopaque, A, t.Control, []const []const V) anyerror!void = null,
+};
 pub const Functions = std.StringHashMap(Function);
 pub const Emit = struct { context: *anyopaque, send: *const fn (*anyopaque, t.Result, bool) anyerror!void };
 fn eq(a: []const u8, b: []const u8) bool {
@@ -199,6 +204,23 @@ const Eval = struct {
         }
         return true;
     }
+    fn prepare(e: *Eval, expr: *p.Expr, rows: []const usize) anyerror!void {
+        if (expr.kind != .call) return;
+        for (expr.args) |arg| try e.prepare(arg, rows);
+        const f = e.functions.get(expr.name).?;
+        const prefetch = f.prepare orelse return;
+        var arena = std.heap.ArenaAllocator.init(e.a);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var arguments: std.ArrayList([]const V) = .empty;
+        for (rows) |row| {
+            if (e.cache.contains(.{ .expression = expr, .row = row })) continue;
+            const args = try a.alloc(V, expr.args.len);
+            for (expr.args, 0..) |arg, i| args[i] = try e.value(arg, row);
+            try arguments.append(a, args);
+        }
+        if (arguments.items.len > 0) try prefetch(f.context, a, e.control, arguments.items);
+    }
 };
 fn indices(a: A, n: usize) ![]usize {
     const result = try a.alloc(usize, n);
@@ -311,7 +333,14 @@ pub fn execute(a: A, control: t.Control, q: Query, tables: t.Tables, functions: 
         const active = try orderRows(&e, selects, q.order);
         const start = @min(q.offset, active.len);
         const end = if (q.limit) |limit| start + @min(limit, active.len - start) else active.len;
-        for (active[start..end]) |row| {
+        const page = active[start..end];
+        for (page, 0..) |row, index| {
+            // Prepare only a bounded batch of output rows after pagination.
+            // Window layouts still include the complete filtered input, so
+            // LAG can refer to the frame immediately before this page.
+            if (index % 32 == 0) {
+                for (selects) |s| try e.prepare(s.expression, page[index..@min(index + 32, page.len)]);
+            }
             if (emit != null) _ = scratch.reset(.retain_capacity);
             const values = try row_allocator.alloc(V, selects.len);
             for (selects, 0..) |s, j| values[j] = try e.value(s.expression, row);
@@ -342,6 +371,47 @@ test "window input filtering, defaults, subqueries and pagination" {
     try std.testing.expectEqual(@as(usize, 1), result.rows.len);
     try std.testing.expectEqual(@as(i128, 2), result.rows[0][0].int);
     try std.testing.expectEqual(@as(i128, 1), result.rows[0][1].int);
+}
+test "window function preparation is bounded to the output page and retains preceding rows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rows = try a.alloc([]const V, 100);
+    for (rows, 0..) |*row, i| row.* = try a.dupe(V, &.{.{ .int = @intCast(i + 1) }});
+    const input = t.Result{ .columns = &.{"n"}, .rows = rows };
+    var tables = t.Tables.init(a);
+    try tables.put("frames", input.table());
+    const State = struct {
+        prepared: usize = 0,
+        evaluated: usize = 0,
+        batches: usize = 0,
+        fn prepare(ctx: *anyopaque, _: A, _: t.Control, arguments: []const []const V) !void {
+            const s: *@This() = @ptrCast(@alignCast(ctx));
+            try std.testing.expect(arguments.len <= 32);
+            for (arguments) |args| {
+                try std.testing.expectEqual(@as(i128, @intCast(s.prepared + 11)), args[0].int);
+                try std.testing.expectEqual(args[0].int - 1, args[1].int);
+                s.prepared += 1;
+            }
+            s.batches += 1;
+        }
+        fn evaluate(ctx: *anyopaque, _: A, _: t.Control, args: []const V) !V {
+            const s: *@This() = @ptrCast(@alignCast(ctx));
+            try std.testing.expect(s.evaluated < s.prepared);
+            s.evaluated += 1;
+            return .{ .int = args[0].int - args[1].int };
+        }
+    };
+    var state: State = .{};
+    var functions = Functions.init(a);
+    try functions.put("difference", .{ .arity = 2, .context = &state, .evaluate = State.evaluate, .prepare = State.prepare });
+    const query = try parse(a, "SELECT n, difference(n, LAG(n) OVER (ORDER BY n)) AS score FROM frames ORDER BY n LIMIT 35 OFFSET 10");
+    const result = try execute(a, .{ .io = std.testing.io }, query, tables, functions, null);
+    try std.testing.expectEqual(@as(usize, 35), result.rows.len);
+    try std.testing.expectEqual(@as(usize, 35), state.prepared);
+    try std.testing.expectEqual(@as(usize, 35), state.evaluated);
+    try std.testing.expectEqual(@as(usize, 2), state.batches);
+    for (result.rows) |row| try std.testing.expectEqual(@as(i128, 1), row[1].int);
 }
 
 test "cheap filters precede inference and LIMIT stops further calls" {
