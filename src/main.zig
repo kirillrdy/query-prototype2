@@ -1,49 +1,37 @@
 const std = @import("std");
 const q = @import("query");
+const A = std.mem.Allocator;
+const help =
+    \\Usage: bquery [-query SQL | -c SQL] [--json] [--no-pager] [--page-size N] [FILE ...]
+    \\Without a query, starts an SQL REPL. End statements with ; or use \g.
+    \\SQL can open files directly: SELECT * FROM frames('video.mp4') LIMIT 48;
+    \\Commands: \q quit, \h help, \g execute, \r clear query, \p show query
+    \\          \pset pager on|off, \pset format table|json
+    \\Tables page in a terminal (24 rows per page); redirected output never pauses.
+    \\JSON includes complete frame metadata and mask results.
+    \\
+;
+const Options = struct { json: bool = false, pager: bool = true, page_size: usize = 24 };
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
         std.debug.print("bquery: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
-fn run(init: std.process.Init) !void {
-    const control = @import("query").control;
-    control.install();
-    var check = control.RequestControl{ .io = init.io };
-    const c = q.types.Control{ .io = init.io, .check_context = &check, .check_fn = control.RequestControl.canceled };
-    var arena = std.heap.ArenaAllocator.init(init.gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const args = try init.minimal.args.toSlice(a);
-    var sql: []const u8 = "SELECT * FROM frames LIMIT 100";
-    var i: usize = 1;
-    while (i < args.len and std.mem.startsWith(u8, args[i], "-")) {
-        if (std.mem.eql(u8, args[i], "--")) {
-            i += 1;
-            break;
-        }
-        if (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--help")) {
-            std.debug.print("Usage: bquery [-query SQL] [FILE ...]\nSQL can open files directly: SELECT * FROM frames('video.mp4') LIMIT 100\n", .{});
-            return;
-        }
-        const flag = if (std.mem.startsWith(u8, args[i], "--")) args[i][1..] else args[i];
-        if (std.mem.startsWith(u8, flag, "-query=")) {
-            sql = flag[7..];
-            i += 1;
-            continue;
-        }
-        if (!std.mem.eql(u8, flag, "-query") or i + 1 >= args.len) return error.InvalidArgument;
-        sql = args[i + 1];
-        i += 2;
-    }
+fn write(io: std.Io, value: []const u8) !void {
+    try std.Io.File.stdout().writeStreamingAll(io, value);
+}
+fn execute(a: A, io: std.Io, video: *q.video.Runtime, sql: []const u8, files: []const []const u8, options: Options, terminal: bool, input: *std.Io.Reader) !void {
+    var check = q.control.RequestControl{ .io = io };
+    const c = q.types.Control{ .io = io, .check_context = &check, .check_fn = q.control.RequestControl.canceled };
     const parsed = try q.engine.parse(a, sql);
     const paths = if (parsed.sourceFile()) |filename| blk: {
-        if (i != args.len) return error.ConflictingInputFiles;
+        if (files.len != 0) return error.ConflictingInputFiles;
         break :blk try a.dupe([]const u8, &.{filename});
-    } else args[i..];
+    } else files;
     if (paths.len == 0) return error.InputFileRequired;
     if (!parsed.uses(&.{ "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) {
-        check.deadline_ns = std.Io.Timestamp.now(init.io, .awake).nanoseconds + 120 * std.time.ns_per_s;
+        check.deadline_ns = std.Io.Timestamp.now(io, .awake).nanoseconds + 120 * std.time.ns_per_s;
     }
     var tables = q.types.Tables.init(a);
     var parts: std.ArrayList(q.types.Table) = .empty;
@@ -52,10 +40,148 @@ fn run(init: std.process.Init) !void {
         try parts.append(a, all.get(parsed.source()) orelse return error.UnknownTable);
     }
     try tables.put(parsed.source(), try q.types.combine(a, parts.items));
+    const result = try q.engine.execute(a, c, parsed, tables, try video.functions(a), null);
+    if (options.json) {
+        try write(io, try std.json.Stringify.valueAlloc(a, result, .{ .whitespace = .indent_2 }));
+        try write(io, "\n");
+        return;
+    }
+    const table = try q.cli.Table.init(a, result);
+    const paged = terminal and options.pager;
+    var start: usize = 0;
+    while (true) {
+        const end = if (paged) start + @min(options.page_size, result.rows.len - start) else result.rows.len;
+        try write(io, try table.page(a, start, end));
+        if (end == result.rows.len) break;
+        try write(io, try std.fmt.allocPrint(a, "-- Rows {d}-{d} of {d} · Enter: next page, q: stop -- ", .{ start + 1, end, result.rows.len }));
+        const line = (try input.takeDelimiter('\n')) orelse break;
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t\r"), "q")) break;
+        start = end;
+    }
+    try write(io, try std.fmt.allocPrint(a, "({d} {s})\n", .{ result.rows.len, if (result.rows.len == 1) "row" else "rows" }));
+}
+fn executeRepl(a: A, io: std.Io, video: *q.video.Runtime, sql: []const u8, files: []const []const u8, options: Options, terminal: bool, input: *std.Io.Reader) !bool {
+    if (std.mem.trim(u8, sql, " \t\r\n").len == 0) return true;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    execute(arena.allocator(), io, video, sql, files, options, terminal, input) catch |err| {
+        std.debug.print("ERROR: {s}\n", .{@errorName(err)});
+        return false;
+    };
+    return true;
+}
+fn repl(a: A, io: std.Io, video: *q.video.Runtime, files: []const []const u8, initial: Options, terminal: bool, input: *std.Io.Reader) !void {
+    var options = initial;
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(a);
+    var failed = false;
+    if (terminal) try write(io, "Binary Query SQL console. Use ; to run a query, \\h for help, \\q to quit.\n");
+    while (true) {
+        if (terminal) try write(io, if (std.mem.trim(u8, pending.items, " \t\r\n").len == 0) "bquery=> " else "bquery-> ");
+        const raw = (try input.takeDelimiter('\n')) orelse {
+            if (!try executeRepl(a, io, video, pending.items, files, options, terminal, input)) failed = true;
+            break;
+        };
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (std.mem.startsWith(u8, line, "\\")) {
+            if (std.mem.eql(u8, line, "\\q")) break;
+            if (std.mem.eql(u8, line, "\\h") or std.mem.eql(u8, line, "\\help") or std.mem.eql(u8, line, "\\?")) {
+                try write(io, help);
+                continue;
+            }
+            if (std.mem.eql(u8, line, "\\r")) {
+                pending.clearRetainingCapacity();
+                continue;
+            }
+            if (std.mem.eql(u8, line, "\\p")) {
+                try write(io, pending.items);
+                continue;
+            }
+            if (std.mem.eql(u8, line, "\\g")) {
+                if (!try executeRepl(a, io, video, pending.items, files, options, terminal, input)) failed = true;
+                pending.clearRetainingCapacity();
+                continue;
+            }
+            if (std.mem.eql(u8, line, "\\pset pager off")) {
+                options.pager = false;
+                continue;
+            }
+            if (std.mem.eql(u8, line, "\\pset pager on")) {
+                options.pager = true;
+                continue;
+            }
+            if (std.mem.eql(u8, line, "\\pset format json")) {
+                options.json = true;
+                continue;
+            }
+            if (std.mem.eql(u8, line, "\\pset format table")) {
+                options.json = false;
+                continue;
+            }
+            std.debug.print("Unknown command. Use \\h for help.\n", .{});
+            failed = true;
+            continue;
+        }
+        try pending.appendSlice(a, raw);
+        try pending.append(a, '\n');
+        while (q.cli.statementEnd(pending.items)) |end| {
+            if (!try executeRepl(a, io, video, pending.items[0..end], files, options, terminal, input)) failed = true;
+            const remaining = pending.items.len - end - 1;
+            std.mem.copyForwards(u8, pending.items[0..remaining], pending.items[end + 1 ..]);
+            pending.shrinkRetainingCapacity(remaining);
+        }
+    }
+    if (failed and !terminal) return error.QueryFailed;
+}
+fn run(init: std.process.Init) !void {
+    q.control.install();
+    var arena = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const args = try init.minimal.args.toSlice(a);
+    var options: Options = .{};
+    var sql: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < args.len and std.mem.startsWith(u8, args[i], "-")) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--")) {
+            i += 1;
+            break;
+        }
+        if (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--help")) {
+            try write(init.io, help);
+            return;
+        }
+        const flag = if (std.mem.startsWith(u8, args[i], "--")) args[i][1..] else args[i];
+        if (std.mem.eql(u8, flag, "-json")) {
+            options.json = true;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "-no-pager")) {
+            options.pager = false;
+            continue;
+        }
+        if (std.mem.startsWith(u8, flag, "-query=")) {
+            sql = flag[7..];
+            continue;
+        }
+        if (i + 1 >= args.len) return error.InvalidArgument;
+        if (std.mem.eql(u8, flag, "-query") or std.mem.eql(u8, flag, "-c")) {
+            i += 1;
+            sql = args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "-page-size")) {
+            i += 1;
+            options.page_size = std.fmt.parseInt(usize, args[i], 10) catch return error.InvalidArgument;
+            if (options.page_size == 0) return error.InvalidArgument;
+            continue;
+        }
+        return error.InvalidArgument;
+    }
+    const terminal = try std.Io.File.stdin().isTty(init.io) and try std.Io.File.stdout().isTty(init.io);
+    var buffer: [65536]u8 = undefined;
+    var reader = std.Io.File.stdin().readerStreaming(init.io, &buffer);
     var video = try q.video.Runtime.init(init.gpa, init.io);
     defer video.deinit();
-    const result = try q.engine.execute(a, c, parsed, tables, try video.functions(a), null);
-    const json = try std.json.Stringify.valueAlloc(a, result, .{ .whitespace = .indent_2 });
-    try std.Io.File.stdout().writeStreamingAll(init.io, json);
-    try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+    if (sql) |query| try execute(a, init.io, &video, std.mem.trimEnd(u8, query, " \t\r\n;"), args[i..], options, terminal, &reader.interface) else try repl(init.gpa, init.io, &video, args[i..], options, terminal, &reader.interface);
 }

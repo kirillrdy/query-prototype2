@@ -5,6 +5,7 @@ pub const parse = @import("parse.zig");
 pub const video = @import("video.zig");
 pub const web = @import("web.zig");
 pub const control = @import("control.zig");
+pub const cli = @import("cli.zig");
 test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("integration_test.zig");

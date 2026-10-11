@@ -29,12 +29,33 @@ frames require `ffmpeg` and `ffprobe` on PATH. SAM3 requires a working GPU for
 the selected backend. Its model assets are loaded lazily, with missing files
 downloaded using curl into `~/.cache/sam3-zig` on first inference.
 
-Results contain an ordered `columns` array and JSON objects in `rows`.
+The CLI prints aligned tables, with 24 rows per page in a terminal. Press Enter
+for the next page or `q` then Enter to stop paging. Use `--page-size N` to change
+the page size or `--no-pager` to print everything. Redirected output never pauses.
+Use `--json` for complete results with an ordered `columns` array and JSON
+objects in `rows`, including full frame metadata and mask RLEs. Table cells are
+limited to 64 bytes plus an ellipsis; frame cells show their presentation index.
 Table functions open their named local file directly, in the CLI and web app.
 Plain table names also accept positional CLI input files, with LIMIT applying
-globally; the default CLI query is `SELECT * FROM frames LIMIT 100`.
+globally.
 Use either a filename in SQL or positional CLI files in a query.
 Any input error fails the command before results are emitted.
+
+Run `./bquery` without a query to enter the SQL console. Statements can span
+multiple lines and execute at `;`. The console keeps models and inference caches
+loaded between queries; query errors return to the prompt.
+
+```sql
+bquery=> SELECT frame, path, frame_index, pts_seconds
+bquery-> FROM frames('/home/kirillvr/holes_3min.mp4')
+bquery-> LIMIT 48;
+```
+
+Use `\q` to quit, `\h` for help, `\g` to execute the current query without a
+semicolon, `\p` to print it, or `\r` to clear it. `\pset pager on|off` and
+`\pset format table|json` change output options. `./bquery video.mp4` starts the
+console with a default input for plain table names such as `FROM frames`.
+SQL piped to stdin also works without prompts; errors produce a nonzero exit.
 
 ## Web workbench
 
