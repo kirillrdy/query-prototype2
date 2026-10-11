@@ -2,15 +2,17 @@
 
 A native Zig query engine and local web workbench for MP4/MOV files. Query
 container metadata, exact encoded frame references, motion, object counts,
-and SAM3 text segmentation. SAM3 is imported directly from `../sam3` and runs
+and SAM3 text segmentation. SAM3 is imported as a Zig dependency and runs
 inside the CLI/server process; no SAM3 worker or Python service is needed.
 
 ## Build and run
 
-Use Zig 0.17 with this checkout and `~/sam3` as sibling directories. The local
-SAM3 dependency is declared in `build.zig.zon`; adjust its path if necessary.
+Use Zig 0.17. The SAM3 dependency is pinned to a GitHub commit in
+`build.zig.zon` and downloaded automatically by Zig on the first build.
 
 ```sh
+git clone https://github.com/kirillrdy/query.git
+cd query
 zig build -Doptimize=ReleaseSmall
 ./zig-out/bin/bquery-web
 ./zig-out/bin/bquery -query "SELECT path, frame_index, pts_seconds FROM frames('video.mp4') LIMIT 10"
