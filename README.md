@@ -53,13 +53,13 @@ LIMIT 100
 
 Results have **Table**, **Graph**, and **Player** tabs. Click a frame cell or a
 graph point to open its preview in **Player** and download its exact encoded
-sample bytes. Select rows in **Table**, then use **Play** in **Player**
-for an image sequence, without audio. Switching tabs preserves the selection
+sample bytes. **Player** includes all frames returned by the query; use **Play**
+for an image sequence, without audio. Switching tabs preserves the query frames
 and pauses playback when leaving the player.
 Player keeps the frame, masks, and playback bar visible. Expand **Details** for
 frame metadata, speed, playback order, and the binary download.
 Playback starts with the first frame and buffers two frames ahead, decoding
-previews on demand instead of preparing the entire selection.
+previews on demand instead of preparing every query frame.
 Playback can follow presentation order or result order, with scrubbing, speed
 controls, and single-frame stepping. **Graph** appends numeric points as results
 arrive, keeping existing points and keyboard focus. Updates are batched to screen
@@ -67,7 +67,7 @@ refreshes; the hidden table catches up when you select **Table**.
 SAM3 masks overlay the frame preview automatically when the same row contains
 one frame and a segmentation result. Use **Show masks** and **Opacity** to adjust
 the overlay. Different masks use different colors; with multiple segmentation
-columns, choose which one to display. Overlays also follow selected-frame
+columns, choose which one to display. Overlays also follow frame
 playback. Object results remain available as JSON in the table.
 
 Each table function reads only its named file. Repeated queries reuse cached
@@ -123,11 +123,15 @@ WHERE frame_index = 3000
 LIMIT 1
 ```
 
-`src/video.zig` uses `@import("sam3")` directly. The model stays loaded across
+`src/video.zig` uses `@import("sam3")` directly and opens only the text-prompt
+graphs, skipping the point-prompt encoder and decoder. The model stays loaded across
 queries. The latest image embedding, up to 32 text features, and up to 32
 segmentation results are reused; count, score, and masks share one inference
 result. Set `BQUERY_SAM3_CONFIDENCE` to a value greater than zero and at most one
 to change the default acceptance threshold of `0.5`.
+Set `BQUERY_PROFILE_SAM3=1` when starting the CLI or server to log per-frame
+model loading, frame decoding, image encoding, text encoding, mask decoding,
+and RLE timings. The first inference includes model and GPU initialization.
 
 ### Motion and windows
 

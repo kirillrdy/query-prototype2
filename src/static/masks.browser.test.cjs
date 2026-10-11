@@ -30,6 +30,8 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         check($('sql').value.includes("FROM frames('/tmp/it''s a video.mp4')"), 'Frame examples preserve the filename');
         await runQuery();
         await until(() => !$('mask-controls').hidden);
+        check(!$('results').querySelector('input[type="checkbox"]'), 'Query frames need no row selection');
+        check(queue.length === 2 && $('frame-count').textContent === '2 frames', 'Player includes every returned frame');
         check(!$('table-view').hidden && $('player-view').hidden, 'Results stay in Table until Player is selected');
         check($('player-view').parentElement.classList.contains('result-panel'), 'Player lives beside the other result panels');
         $('view-player').click();
@@ -67,7 +69,7 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         $('view-graph').click();
         check(!$('graph-view').hidden && $('player-view').hidden, 'Graph tab visibility');
         $('view-table').click();
-        check(!$('table-view').hidden && $('player-view').hidden && queue.length === 2, 'Table preserves selected frames');
+        check(!$('table-view').hidden && $('player-view').hidden && queue.length === 2, 'Table preserves query frames');
         document.querySelector('.frame-cell').click();
         await until(() => $('mask-count').textContent === '2 masks' && !canvas.hidden);
         check(!$('player-view').hidden, 'Frame click opens Player');
@@ -107,14 +109,14 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         inspectGraphRow(1); // A queued click from an old chart is harmless.
         setResultView('graph');
         check(!$('graph-plot').querySelector('.graph-point'), 'Graph shows only the new query results');
-        // Later previews stay blocked while the first selected frame plays.
+        // Later previews stay blocked while the first query frame plays.
         $('sql').value = "SELECT frame FROM frames('fixture.mp4') WHERE frame_index >= 4000 LIMIT 43";
         await runQuery();
         await until(() => $('frame-badge').textContent === 'PTS 4000.000 s');
         const playback = play();
         await until(() => playing && !$('player-view').hidden);
         await playback;
-        check($('message').textContent === 'Playing 43 selected frames.', 'Playback starts without preparing the selection');
+        check(queue.length === 43 && $('message').textContent === 'Playing 43 frames.', 'Playback starts with every query frame without preparing all previews');
         const status = await (await fetch('/__status')).json();
         check(status.renderCalls === 0, 'No bulk render requests');
         check(status.requested.includes(4000) && status.requested.every(index => index <= 4002), 'Only the current frame and bounded lookahead are requested');

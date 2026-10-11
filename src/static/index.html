@@ -26,10 +26,10 @@ LIMIT 48</textarea>
   <label id="mask-column-label" hidden>Segmentation <select id="mask-column"></select></label>
   <label class="mask-opacity">Opacity <input id="mask-opacity" type="range" min="0" max="1" step="0.05" value="0.5"></label>
  </div>
- <div class="transport"><button id="previous" aria-label="Previous selected frame" disabled>‹</button><button id="play" class="primary" disabled>▶ Play</button><button id="next" aria-label="Next selected frame" disabled>›</button><label class="sr-only" for="scrub">Selected frame position</label><input id="scrub" type="range" min="0" max="0" value="0" disabled><span id="position">0 / 0</span></div>
+ <div class="transport"><button id="previous" aria-label="Previous frame" disabled>‹</button><button id="play" class="primary" disabled>▶ Play</button><button id="next" aria-label="Next frame" disabled>›</button><label class="sr-only" for="scrub">Frame position</label><input id="scrub" type="range" min="0" max="0" value="0" disabled><span id="position">0 / 0</span></div>
  <details id="player-details" class="player-details"><summary>Details</summary>
   <div class="viewer-meta"><strong id="frame-title">No frame selected</strong><span id="frame-detail" class="muted">Binary frame + decoded preview</span></div>
-  <div class="player-settings"><label>Speed <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Order <select id="order"><option value="presentation">Presentation time</option><option value="result">Query result order</option></select></label><span id="selection-count" class="count">0 selected</span><span class="muted">No audio</span></div>
+  <div class="player-settings"><label>Speed <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><label>Order <select id="order"><option value="presentation">Presentation time</option><option value="result">Query result order</option></select></label><span id="frame-count" class="count">0 frames</span><span class="muted">No audio</span></div>
   <a id="download" class="download" hidden>↓ Download binary frame</a>
  </details>
  <div id="decoder-note" class="decoder-note" hidden>Previews need FFmpeg and FFprobe installed on this machine. Binary downloads and text queries are available.</div>

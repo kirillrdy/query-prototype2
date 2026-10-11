@@ -8,7 +8,7 @@ const examples = {
   keyframes: "SELECT frame, path, pts_seconds, size\nFROM frames('filename.mp4')\nWHERE is_keyframe = true\nLIMIT 100",
   tracks: "SELECT path, track_id, handler, codec, width, height\nFROM tracks('filename.mp4')"
 };
-let result = { columns: [], rows: [] }, selection = new Set(), queue = [], position = 0;
+let result = { columns: [], rows: [] }, queue = [], position = 0;
 let generation = 0, previewVersion = 0, playbackVersion = 0, playing = false, decoderAvailable = false;
 const images = new Map();
 const frameRows = new Map(), queueRows = new Map();
@@ -32,7 +32,7 @@ function stop() { playing = false; playbackVersion++; previewVersion++; $("play"
 function updateQueue(stopPlayback = true) {
   if (stopPlayback) stop(); const unique = new Map();
   queueRows.clear();
-  result.rows.forEach((row, index) => { if (selection.has(index)) for (const f of frameValues(row)) { unique.set(f.id, f); queueRows.set(f.id, row); } });
+  result.rows.forEach(row => { for (const f of frameValues(row)) { unique.set(f.id, f); queueRows.set(f.id, row); } });
   queue = [...unique.values()];
   if ($("order").value === "presentation") {
     const groups = new Map(); for (const f of queue) { const key = f.id.split("-")[0] + ":" + f.track_id; if (!groups.has(key)) groups.set(key, groups.size); }
@@ -40,7 +40,7 @@ function updateQueue(stopPlayback = true) {
     queue.sort((a, b) => group(a) - group(b) || a.pts_seconds - b.pts_seconds || a.frame_index - b.frame_index);
   }
   position = Math.min(position, Math.max(0, queue.length - 1));
-  $("selection-count").textContent = queue.length + " selected";
+  $("frame-count").textContent = queue.length + " frames";
   $("play").disabled = !queue.length || !decoderAvailable;
   $("previous").disabled = $("next").disabled = $("scrub").disabled = !queue.length;
   $("scrub").max = Math.max(0, queue.length - 1); updatePosition();
@@ -49,25 +49,11 @@ function updatePosition() { $("scrub").value = position; $("position").textConte
 function renderTable() {
   const head = $("results").querySelector("thead"), body = $("results").querySelector("tbody"); head.replaceChildren(); body.replaceChildren();
   $("empty").hidden = result.rows.length > 0; $("row-count").textContent = result.rows.length;
-  if (!result.rows.length) { $("empty").querySelector("h3").textContent = "No matching rows"; $("empty").querySelector("p").textContent = "Try a wider selection or another table."; }
-  const hasFrames = result.rows.some(row => frameValues(row).length);
+  if (!result.rows.length) { $("empty").querySelector("h3").textContent = "No matching rows"; $("empty").querySelector("p").textContent = "Try a wider query or another table."; }
   const hr = document.createElement("tr");
-  if (hasFrames) {
-    const th = document.createElement("th"), all = document.createElement("input"); all.type = "checkbox"; all.checked = selection.size === result.rows.filter(row => frameValues(row).length).length; all.indeterminate = selection.size > 0 && !all.checked; all.setAttribute("aria-label", "Select all frame rows");
-    all.addEventListener("change", () => {
-      selection.clear(); if (all.checked) result.rows.forEach((row, i) => { if (frameValues(row).length) selection.add(i); });
-      body.querySelectorAll("input[type=checkbox]").forEach(c => { c.checked = selection.has(Number(c.dataset.row)); }); updateQueue();
-    }); th.append(all); hr.append(th);
-  }
   for (const c of result.columns) hr.append(text("th", c)); head.append(hr);
   result.rows.forEach((row, index) => {
     const tr = document.createElement("tr"); tr.dataset.row = index;
-    if (hasFrames) {
-      const td = document.createElement("td"); if (frameValues(row).length) {
-        const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = selection.has(index); checkbox.dataset.row = index; checkbox.setAttribute("aria-label", `Select frame row ${index + 1}`);
-        checkbox.addEventListener("change", () => { if (checkbox.checked) selection.add(index); else selection.delete(index); allState(); updateQueue(); }); td.append(checkbox);
-      } tr.append(td);
-    }
     for (const c of result.columns) {
       const td = document.createElement("td"), value = row[c];
       if (value && value.type === "frame") {
@@ -78,7 +64,6 @@ function renderTable() {
       tr.append(td);
     } body.append(tr);
   });
-  function allState() { const all = head.querySelector("input"); if (!all) return; const count = result.rows.filter(r => frameValues(r).length).length; all.checked = selection.size === count; all.indeterminate = selection.size > 0 && selection.size < count; }
 }
 function renderResults() {
   $("row-count").textContent = result.rows.length;
@@ -182,7 +167,7 @@ async function show(frame, quiet = false, row = queueRows.get(frame.id) || frame
   $("preview").src = img.src; $("preview").hidden = false; $("preview-empty").hidden = true;
   showMasks(img, row);
   $("frame-badge").textContent = `PTS ${frame.pts_seconds.toFixed(3)} s`; $("frame-badge").hidden = false;
-  if (!playing && !quiet) message("Frame ready. Select rows to create a playback sequence.");
+  if (!playing && !quiet) message("Frame ready.");
 }
 async function readQueryStream(sql, signal, receive) {
   const response = await fetch("/api/query/stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sql }), signal });
@@ -211,7 +196,7 @@ async function runQuery() {
   const controller = new AbortController(); queryController = controller;
   const version = ++generation, started = performance.now(); let firstRow = null;
   previewVersion++; stop(); $("run").disabled = true; $("cancel-query").hidden = false; message("Running query…", "busy");
-  result = { columns: [], rows: [] }; graphAxesChosen = false; selection.clear(); renderResults(); updateQueue();
+  result = { columns: [], rows: [] }; graphAxesChosen = false; renderResults(); updateQueue();
   frameRows.clear(); clearMasks();
   $("preview").hidden = true; $("preview-empty").hidden = false; $("frame-badge").hidden = true; $("download").hidden = true;
   $("frame-title").textContent = "No frame selected"; $("frame-detail").textContent = "Binary frame + decoded preview";
@@ -223,7 +208,7 @@ async function runQuery() {
         result.columns = event.columns; renderResults(); $("result-note").textContent = "Preparing query input…";
       } else if (event.type === "rows") {
         const first = result.rows.length === 0;
-        for (const row of event.rows) { const index = result.rows.length; result.rows.push(row); const frames = frameValues(row); if (frames.length) selection.add(index); for (const frame of frames) if (!frameRows.has(frame.id)) frameRows.set(frame.id, row); }
+        for (const row of event.rows) { result.rows.push(row); for (const frame of frameValues(row)) if (!frameRows.has(frame.id)) frameRows.set(frame.id, row); }
         if (firstRow == null && event.rows.length) firstRow = performance.now() - started;
         scheduleResults();
         const note = $("result-note");
@@ -238,7 +223,7 @@ async function runQuery() {
         }
       } else if (event.type === "done") {
         flushResults();
-        $("result-note").textContent = queue.length ? "Select rows for playback · click a frame to inspect" : "Scalar query results";
+        $("result-note").textContent = queue.length ? "Click a frame to inspect" : "Scalar query results";
         message(`${result.rows.length} rows returned${timing()}.`);
       }
     });
@@ -260,7 +245,7 @@ async function play() {
   const version = ++playbackVersion; playing = true; $("play").textContent = "Ⅱ Pause";
   try {
     if (position === queue.length - 1) position = 0;
-    message(`Playing ${queue.length} selected frames.`, "busy"); let due = performance.now();
+    message(`Playing ${queue.length} frames.`, "busy"); let due = performance.now();
     const tick = async () => {
       if (version !== playbackVersion) return;
       // Request the current frame first, then buffer just two ahead. Preview
@@ -273,7 +258,7 @@ async function play() {
       due = Math.max(due, performance.now()) + duration * 1000;
       setTimeout(() => {
         if (version !== playbackVersion) return;
-        if (position + 1 >= queue.length) { stop(); message("Selection finished."); return; }
+        if (position + 1 >= queue.length) { stop(); message("Playback finished."); return; }
         position++; tick().catch(error => { if (version === playbackVersion) { stop(); message(error.message, "error"); } });
       }, Math.max(0, due - performance.now()));
     }; await tick();

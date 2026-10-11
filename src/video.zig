@@ -21,6 +21,22 @@ pub const Segmentation = struct { count: usize, score: f32, width: usize, height
 const Signature = struct { size: u64, mtime: i96 };
 const SamCache = struct { arena: std.heap.ArenaAllocator, result: Segmentation };
 const Counts = [80]u32;
+const SamTiming = struct {
+    io: std.Io,
+    frame_index: usize,
+    enabled: bool,
+    last: i96,
+    fn init(io: std.Io, frame_index: usize) SamTiming {
+        const enabled = t.env("BQUERY_PROFILE_SAM3") != null;
+        return .{ .io = io, .frame_index = frame_index, .enabled = enabled, .last = if (enabled) std.Io.Timestamp.now(io, .awake).nanoseconds else 0 };
+    }
+    fn mark(self: *SamTiming, stage: []const u8) void {
+        if (!self.enabled) return;
+        const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+        std.debug.print("SAM3 frame {d} {s}: {d:.2} ms\n", .{ self.frame_index, stage, @as(f64, @floatFromInt(now - self.last)) / std.time.ns_per_ms });
+        self.last = now;
+    }
+};
 pub const Runtime = struct {
     a: A,
     io: std.Io,
@@ -278,13 +294,15 @@ pub const Runtime = struct {
         }
     }
     fn segment(r: *Runtime, a: A, control: t.Control, f: t.Frame, phrase: []const u8) !Segmentation {
+        var timing = SamTiming.init(r.io, f.frame_index);
         try control.check();
         try r.checkSource(f);
         const threshold = try confidence("BQUERY_SAM3_CONFIDENCE", 0.5);
         const frame_key = try id(a, f);
         const key = try std.fmt.allocPrint(a, "{s}:{s}", .{ frame_key, phrase });
         if (r.results.get(key)) |cached| return cached.result;
-        if (r.model == null) r.model = try sam3.Model.open(r.a, r.io);
+        if (r.model == null) r.model = try sam3.Model.openText(r.a, r.io);
+        timing.mark("model ready");
         if (r.embedding_key == null or !std.mem.eql(u8, r.embedding_key.?, frame_key)) {
             if (r.embedding) |*e| e.deinit();
             r.embedding = null;
@@ -295,9 +313,11 @@ pub const Runtime = struct {
             const bytes = try std.Io.Dir.cwd().readFileAlloc(r.io, png, a, .limited(32 << 20));
             var image = try sam3.decodeImage(a, bytes);
             defer image.deinit(a);
+            timing.mark("frame decode");
             r.embedding = try r.model.?.encodeForText(sam3.RgbImage.fromImage(image));
             r.embedding_key = try r.a.dupe(u8, frame_key);
         }
+        timing.mark("image encoder");
         try control.check();
         if (!r.features.contains(phrase)) {
             if (r.features.count() >= 32) {
@@ -312,7 +332,9 @@ pub const Runtime = struct {
             errdefer r.a.free(features);
             try r.features.put(try r.a.dupe(u8, phrase), features);
         }
+        timing.mark("text encoder");
         var masks = try r.model.?.findWithTextFeatures(&r.embedding.?, phrase, r.features.get(phrase).?, .{ .min_score = threshold });
+        timing.mark("mask decoder");
         defer masks.deinit();
         try control.check();
         try r.checkSource(f);
@@ -339,6 +361,7 @@ pub const Runtime = struct {
         }
         const result = Segmentation{ .count = masks.count, .score = masks.object_score, .width = masks.width, .height = masks.height, .masks = output };
         try r.results.put(try r.a.dupe(u8, key), .{ .arena = arena, .result = result });
+        timing.mark("mask RLE");
         return result;
     }
     fn detect(r: *Runtime, a: A, control: t.Control, f: t.Frame) !Counts {
