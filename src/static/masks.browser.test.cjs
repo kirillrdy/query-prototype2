@@ -22,6 +22,12 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
       const until = async fn => { for (let n = 0; n < 100; n++) { if (fn()) return; await new Promise(resolve => setTimeout(resolve, 20)); } throw new Error('Preview did not settle'); };
       try {
         await until(() => decoderAvailable);
+        check(!$('upload') && !$('path-picker'), 'File sources are entered in SQL');
+        $('sql').value = "SELECT frame FROM frames('/tmp/it''s a video.mp4') LIMIT 48";
+        document.querySelector('[data-example="tracks"]').click();
+        check($('sql').value.includes("FROM tracks('/tmp/it''s a video.mp4')"), 'Examples preserve the quoted filename');
+        document.querySelector('[data-example="mixed"]').click();
+        check($('sql').value.includes("FROM frames('/tmp/it''s a video.mp4')"), 'Frame examples preserve the filename');
         await runQuery();
         await until(() => !$('mask-controls').hidden);
         check(!$('table-view').hidden && $('player-view').hidden, 'Results stay in Table until Player is selected');
@@ -79,7 +85,7 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         setResultView('graph');
         check($('graph-plot').querySelectorAll('.graph-point').length === 2, 'Previous query graph markers');
         setResultView('player');
-        $('sql').value = "SELECT frame, sam3(frame, 'hat') AS segmentation FROM frames WHERE frame_index = 3000 LIMIT 1";
+        $('sql').value = "SELECT frame, sam3(frame, 'hat') AS segmentation FROM frames('fixture.mp4') WHERE frame_index = 3000 LIMIT 1";
         await runQuery();
         await until(() => !$('mask-controls').hidden || $('message').classList.contains('error'));
         check(!$('message').classList.contains('error'), 'Single-frame query preview: ' + $('message').textContent);
@@ -88,7 +94,7 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         setResultView('graph');
         check(!$('graph-plot').querySelector('.graph-point'), 'Graph shows only the new query results');
         // Later previews stay blocked while the first selected frame plays.
-        $('sql').value = 'SELECT frame FROM frames WHERE frame_index >= 4000 LIMIT 43';
+        $('sql').value = "SELECT frame FROM frames('fixture.mp4') WHERE frame_index >= 4000 LIMIT 43";
         await runQuery();
         await until(() => $('frame-badge').textContent === 'PTS 4000.000 s');
         const playback = play();

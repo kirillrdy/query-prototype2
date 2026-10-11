@@ -1,12 +1,12 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const examples = {
-  sam3: "SELECT frame, sam3(frame, 'hat') AS segmentation\nFROM frames\nWHERE is_keyframe = true\nLIMIT 1",
-  people: "SELECT frame, path, pts_seconds, person_count(frame) AS people\nFROM frames\nWHERE frame_index <= 100\n  AND person_count(frame) > 0\nORDER BY path, pts_seconds",
-	 motion: "SELECT frame, pts_seconds,\n  motion(frame, LAG(frame) OVER (\n    PARTITION BY path, track_id\n    ORDER BY pts_seconds, frame_index\n  )) AS motion_score\nFROM frames\nORDER BY path, track_id, pts_seconds\nLIMIT 100",
-  mixed: "SELECT frame, path, frame_index, pts_seconds\nFROM frames\nLIMIT 48",
-  keyframes: "SELECT frame, path, pts_seconds, size\nFROM frames\nWHERE is_keyframe = true\nLIMIT 100",
-  tracks: "SELECT path, track_id, handler, codec, width, height\nFROM tracks"
+  sam3: "SELECT frame, sam3(frame, 'hat') AS segmentation\nFROM frames('filename.mp4')\nWHERE is_keyframe = true\nLIMIT 1",
+  people: "SELECT frame, path, pts_seconds, person_count(frame) AS people\nFROM frames('filename.mp4')\nWHERE frame_index <= 100\n  AND person_count(frame) > 0\nORDER BY path, pts_seconds",
+	 motion: "SELECT frame, pts_seconds,\n  motion(frame, LAG(frame) OVER (\n    PARTITION BY path, track_id\n    ORDER BY pts_seconds, frame_index\n  )) AS motion_score\nFROM frames('filename.mp4')\nORDER BY path, track_id, pts_seconds\nLIMIT 100",
+  mixed: "SELECT frame, path, frame_index, pts_seconds\nFROM frames('filename.mp4')\nLIMIT 48",
+  keyframes: "SELECT frame, path, pts_seconds, size\nFROM frames('filename.mp4')\nWHERE is_keyframe = true\nLIMIT 100",
+  tracks: "SELECT path, track_id, handler, codec, width, height\nFROM tracks('filename.mp4')"
 };
 let result = { columns: [], rows: [] }, selection = new Set(), queue = [], position = 0;
 let generation = 0, previewVersion = 0, playbackVersion = 0, playing = false, decoderAvailable = false;
@@ -18,37 +18,14 @@ let resultView = "table", graphAxesChosen = false, graphColumns = "";
 const frameValues = row => Object.values(row || {}).filter(v => v && typeof v === "object" && v.type === "frame" && v.id);
 function message(text, kind = "") { $("message").textContent = text; $("message").className = "message " + kind; }
 function text(tag, value, className) { const el = document.createElement(tag); el.textContent = value; if (className) el.className = className; return el; }
-async function api(path, body, method) {
-  const response = await fetch(path, body ? { method: method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : method ? { method } : {});
+async function api(path) {
+  const response = await fetch(path);
   const data = await response.json(); if (!response.ok) throw new Error(data.error || "Request failed"); return data;
 }
 async function refreshInfo() {
   const info = await api("/api/info"); decoderAvailable = info.decoder_available;
-  $("decoder-note").hidden = decoderAvailable; $("sources").replaceChildren();
-  for (const src of info.sources) {
-    const item = text("div", "", "source"), remove = text("button", "×", "remove-source");
-    const name = text("span", src.name, "source-name");
-    name.title = `${src.name} · ${src.frames == null ? "Ready to query" : src.frames.toLocaleString() + " frames"} · ${(src.size / 1048576).toFixed(1)} MB`;
-    remove.title = `Remove ${src.name} from this session`; remove.setAttribute("aria-label", `Remove ${src.name}`);
-    remove.addEventListener("click", () => removeSource(src.id, remove));
-    item.append(name, remove); $("sources").append(item);
-  }
+  $("decoder-note").hidden = decoderAvailable;
   return info;
-}
-async function removeSource(id, button) {
-  if (queryController) queryController.abort(); queryController = null;
-  generation++; previewVersion++; stop(); $("run").disabled = false; $("cancel-query").hidden = true; button.disabled = true;
-  try {
-    await api("/api/source/" + id, null, "DELETE"); const info = await refreshInfo();
-    if (info.sources.length) await runQuery();
-    else {
-      result = { columns: [], rows: [] }; graphAxesChosen = false; selection.clear(); renderResults(); updateQueue();
-      frameRows.clear(); clearMasks();
-      $("preview").hidden = true; $("preview-empty").hidden = false; $("frame-badge").hidden = true; $("download").hidden = true;
-      $("frame-title").textContent = "No frame selected"; $("frame-detail").textContent = "Binary frame + decoded preview"; $("result-note").textContent = "Open a video to query.";
-      $("run").disabled = false; message("Source removed from the session. Open a video to continue.");
-    }
-  } catch (error) { button.disabled = false; message(error.message, "error"); }
 }
 function stop() { playing = false; playbackVersion++; previewVersion++; $("play").textContent = "▶ Play"; }
 function updateQueue(stopPlayback = true) {
@@ -304,26 +281,7 @@ for (const id of ["graph-x", "graph-y"]) $(id).addEventListener("change", () => 
 $("run").addEventListener("click", runQuery);
 $("cancel-query").addEventListener("click", () => { if (queryController) queryController.abort(); });
 $("sql").addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); runQuery(); } });
-document.querySelectorAll("[data-example]").forEach(button => button.addEventListener("click", () => { $("sql").value = examples[button.dataset.example]; $("sql").style.height = Math.max(130, $("sql").value.split("\n").length * 25 + 32) + "px"; $("sql").focus(); }));
+document.querySelectorAll("[data-example]").forEach(button => button.addEventListener("click", () => { const source = $("sql").value.match(/\bFROM\s+(?:frames|tracks|files|boxes)\s*\(\s*('(?:[^']|'')*')\s*\)/i)?.[1] || "'filename.mp4'"; $("sql").value = examples[button.dataset.example].replace("'filename.mp4'", source); $("sql").style.height = Math.max(130, $("sql").value.split("\n").length * 25 + 32) + "px"; $("sql").focus(); }));
 $("play").addEventListener("click", play); $("previous").addEventListener("click", () => move(position - 1)); $("next").addEventListener("click", () => move(position + 1)); $("scrub").addEventListener("input", () => move(Number($("scrub").value)));
 $("order").addEventListener("change", () => { updateQueue(); if (queue.length) move(0); });
-$("upload").addEventListener("change", async () => {
-  stop(); const files = [...$("upload").files]; $("upload").disabled = true; $("run").disabled = true;
-  try {
-    for (const file of files) {
-      message(`Loading ${file.name}…`, "busy"); const body = new FormData(); body.append("file", file);
-      const response = await fetch("/api/upload", { method: "POST", body }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Upload failed");
-    }
-    await refreshInfo(); message("Video registered. Run a query to read its metadata.");
-  } catch (error) { await refreshInfo().catch(() => {}); message(error.message, "error"); }
-  finally { $("upload").value = ""; $("upload").disabled = false; $("run").disabled = false; }
-});
-$("local-source").addEventListener("submit", async e => {
-  e.preventDefault(); const button = $("open-path"); button.disabled = true;
-  try {
-    await api("/api/source", { path: $("local-path").value }); await refreshInfo();
-    $("local-path").value = ""; $("path-picker").open = false; message("Video registered in place. Run a query to read its metadata.");
-  } catch (error) { message(error.message, "error"); }
-  finally { button.disabled = false; }
-});
 refreshInfo().catch(e => message(e.message, "error"));

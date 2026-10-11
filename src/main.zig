@@ -23,7 +23,7 @@ fn run(init: std.process.Init) !void {
             break;
         }
         if (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--help")) {
-            std.debug.print("Usage: bquery [-query SQL] FILE [FILE ...]\n", .{});
+            std.debug.print("Usage: bquery [-query SQL] [FILE ...]\nSQL can open files directly: SELECT * FROM frames('video.mp4') LIMIT 100\n", .{});
             return;
         }
         const flag = if (std.mem.startsWith(u8, args[i], "--")) args[i][1..] else args[i];
@@ -36,14 +36,18 @@ fn run(init: std.process.Init) !void {
         sql = args[i + 1];
         i += 2;
     }
-    if (i == args.len) return error.InputFileRequired;
     const parsed = try q.engine.parse(a, sql);
+    const paths = if (parsed.sourceFile()) |filename| blk: {
+        if (i != args.len) return error.ConflictingInputFiles;
+        break :blk try a.dupe([]const u8, &.{filename});
+    } else args[i..];
+    if (paths.len == 0) return error.InputFileRequired;
     if (!parsed.uses(&.{ "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) {
         check.deadline_ns = std.Io.Timestamp.now(init.io, .awake).nanoseconds + 120 * std.time.ns_per_s;
     }
     var tables = q.types.Tables.init(a);
     var parts: std.ArrayList(q.types.Table) = .empty;
-    for (args[i..]) |path| {
+    for (paths) |path| {
         const all = try q.mp4.read(a, c, path, path, parsed.source());
         try parts.append(a, all.get(parsed.source()) orelse return error.UnknownTable);
     }

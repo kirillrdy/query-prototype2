@@ -74,6 +74,14 @@ const Server = struct {
         src.frames = .init(src.arena.allocator());
         try s.mutex.lock(s.io);
         defer s.mutex.unlock(s.io);
+        for (s.sources.items) |existing| {
+            if (std.mem.eql(u8, existing.path, abs)) {
+                try existing.unchanged(s.io);
+                src.arena.deinit();
+                s.a.destroy(src);
+                return;
+            }
+        }
         if (s.sources.items.len >= 16) return error.SourceLimit;
         try s.sources.append(s.a, src);
     }
@@ -90,13 +98,20 @@ const Server = struct {
         s.retired.deinit(s.a);
         s.runtime.deinit();
     }
-    fn tables(s: *Server, a: A, c: t.Control, name: []const u8) !t.Tables {
+    fn tables(s: *Server, a: A, c: t.Control, name: []const u8, filename: ?[]const u8) !t.Tables {
+        if (mp4.schema(name) == null) return error.UnknownTable;
+        const selected = if (filename) |path| blk: {
+            try s.add(path, path);
+            break :blk try std.Io.Dir.cwd().realPathFileAlloc(s.io, path, a);
+        } else null;
         var parts: std.ArrayList(t.Table) = .empty;
         try s.mutex.lock(s.io);
         defer s.mutex.unlock(s.io);
         if (s.sources.items.len == 0) return error.LoadVideoFirst;
-        if (mp4.schema(name) == null) return error.UnknownTable;
         for (s.sources.items) |src| {
+            if (selected) |path| {
+                if (!std.mem.eql(u8, src.path, path)) continue;
+            }
             try src.unchanged(s.io);
             if (!src.tables.contains(name)) {
                 const alloc = src.arena.allocator();
@@ -160,7 +175,7 @@ const Server = struct {
         const input = try readJSON(struct { sql: []const u8 }, a, request);
         const q = try engine.parse(a, input.sql);
         if (!q.uses(&.{ "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) setDeadline(c);
-        const input_tables = try s.tables(a, c, q.source());
+        const input_tables = try s.tables(a, c, q.source(), q.sourceFile());
         // Only native model and decoder operations share the inference lock.
         // Source metadata and raw downloads remain accessible during inference.
         try lockWithControl(&s.inference_mutex, c);

@@ -11,13 +11,13 @@ Use Zig 0.17 with this checkout and `~/sam3` as sibling directories. The local
 SAM3 dependency is declared in `build.zig.zon`; adjust its path if necessary.
 
 ```sh
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/bquery-web video.mp4 other.mov
-./zig-out/bin/bquery -query 'SELECT path, frame_index, pts_seconds FROM frames LIMIT 10' video.mp4
+zig build -Doptimize=ReleaseSmall
+./zig-out/bin/bquery-web
+./zig-out/bin/bquery -query "SELECT path, frame_index, pts_seconds FROM frames('video.mp4') LIMIT 10"
 
 # Build and run directly:
-zig build run -- -query 'SELECT * FROM tracks' video.mp4
-zig build web -- video.mp4
+zig build run -- -query "SELECT * FROM tracks('video.mp4')"
+zig build web
 
 # NVIDIA backend instead of the default OpenCL (Linux) or Metal (macOS):
 zig build -Doptimize=ReleaseFast -Dbackend=cuda -Dsm=sm_89
@@ -29,21 +29,24 @@ frames require `ffmpeg` and `ffprobe` on PATH. SAM3 requires a working GPU for
 the selected backend. Its model assets are loaded lazily, with missing files
 downloaded using curl into `~/.cache/sam3-zig` on first inference.
 
-CLI flags precede file paths. Results contain an ordered `columns` array and
-JSON objects in `rows`. All supplied files participate in one query; LIMIT
-applies globally. The default query is `SELECT * FROM frames LIMIT 100`.
+Results contain an ordered `columns` array and JSON objects in `rows`.
+Table functions open their named local file directly, in the CLI and web app.
+Plain table names also accept positional CLI input files, with LIMIT applying
+globally; the default CLI query is `SELECT * FROM frames LIMIT 100`.
+Use either a filename in SQL or positional CLI files in a query.
 Any input error fails the command before results are emitted.
 
 ## Web workbench
 
 Open the printed `http://127.0.0.1:3000` URL; `-port 8090` chooses another port.
-Use **Open video** to upload a file or **Open local path** to read it in place.
-Registration checks only the file and format header. Metadata is indexed when
-you run a query; frame counts appear after the first frame query.
+Enter the filename directly in SQL using `frames('video.mp4')`. Absolute paths
+and paths relative to the server's working directory are supported. Escape
+single quotes in filenames as `''`. The file is opened and indexed when the
+query runs. The same syntax works for `files`, `tracks`, and `boxes`.
 
 ```sql
 SELECT frame, path, frame_index, pts_seconds
-FROM frames
+FROM frames('video.mp4')
 WHERE pts_seconds >= 0.5 AND pts_seconds < 2
 LIMIT 100
 ```
@@ -66,11 +69,10 @@ the overlay. Different masks use different colors; with multiple segmentation
 columns, choose which one to display. Overlays also follow selected-frame
 playback. Object results remain available as JSON in the table.
 
-The **×** beside a source removes it from the session without deleting the
-original video. All loaded sources participate in queries. Sources changed
-on disk must be reopened. The server binds to localhost, accepts at most 16
-sources, and checks same-origin requests. Uploads stream to disk without a
-fixed size limit. Temporary uploads and decoded images are removed on exit.
+Each table function reads only its named file. Repeated queries reuse cached
+metadata and frame references. The server binds to localhost, caches up to 16
+sources, and checks same-origin requests. If a source changes on disk, restart
+the server before querying it again. Decoded images are removed on exit.
 
 Queries stream complete rows, show first-row latency, and offer **Cancel query**.
 Received rows remain available after interruption with an incomplete-result
@@ -93,7 +95,7 @@ They are not standalone videos.
 SELECT frame, pts_seconds,
        sam3_count(frame, 'person wearing a hat') AS people,
        sam3_score(frame, 'person wearing a hat') AS confidence
-FROM frames
+FROM frames('video.mp4')
 WHERE is_keyframe = true
   AND sam3_count(frame, 'person wearing a hat') > 0
 LIMIT 10
@@ -115,7 +117,7 @@ frame cell. The segmentation alias is arbitrary; no additional SQL is needed:
 
 ```sql
 SELECT frame, sam3(frame, 'hat') AS segmentation
-FROM frames
+FROM frames('video.mp4')
 WHERE frame_index = 3000
 LIMIT 1
 ```
@@ -134,7 +136,7 @@ SELECT frame, pts_seconds,
          PARTITION BY path, track_id
          ORDER BY pts_seconds, frame_index
        )) AS motion_score
-FROM frames
+FROM frames('video.mp4')
 ORDER BY path, track_id, pts_seconds
 LIMIT 100
 ```
@@ -164,7 +166,7 @@ FROM (
            PARTITION BY path, track_id
            ORDER BY pts_seconds, frame_index
          ) AS previous_frame
-  FROM frames
+  FROM frames('video.mp4')
 ) AS sequenced
 WHERE pts_seconds >= 1 AND pts_seconds < 2
 ORDER BY pts_seconds
@@ -184,7 +186,7 @@ return null. Counts describe each picture, not unique objects across a video.
 
 ```sql
 SELECT frame, path, pts_seconds, person_count(frame) AS people
-FROM frames
+FROM frames('video.mp4')
 WHERE pts_seconds >= 60 AND pts_seconds < 70
   AND person_count(frame) > 0
 ORDER BY path, pts_seconds
@@ -243,7 +245,7 @@ locations yield null offset/frame. Web references also carry IDs and URLs.
 
 ```text
 SELECT * | expression [AS alias] [, expression [AS alias] ...]
-FROM table | (SELECT ...) AS alias
+FROM table | table('filename') | (SELECT ...) AS alias
 [WHERE predicate [AND ...]]
 [ORDER BY column_or_alias [ASC | DESC] [NULLS FIRST | LAST] [, ...]]
 [LIMIT nonnegative_integer]

@@ -70,6 +70,7 @@ pub const Selection = struct { expression: *Expr, name: []const u8 };
 pub const Predicate = struct { left: *Expr, right: ?*Expr = null, upper: ?*Expr = null, op: enum { eq, ne, lt, le, gt, ge, is_null, is_not_null, between, not_between } };
 pub const Query = struct {
     table: []const u8 = "",
+    filename: ?[]const u8 = null,
     subquery: ?*Query = null,
     selects: []const Selection = &.{},
     star: bool = false,
@@ -79,6 +80,9 @@ pub const Query = struct {
     offset: usize = 0,
     pub fn source(q: Query) []const u8 {
         return if (q.subquery) |s| s.source() else q.table;
+    }
+    pub fn sourceFile(q: Query) ?[]const u8 {
+        return if (q.subquery) |s| s.sourceFile() else q.filename;
     }
     pub fn hasWindow(q: Query) bool {
         for (q.selects) |s| {
@@ -200,7 +204,15 @@ const Parser = struct {
             try p.take(")");
             _ = p.accept("as");
             _ = try p.identifier();
-        } else q.table = try p.identifier();
+        } else {
+            q.table = try p.identifier();
+            if (p.accept("(")) {
+                if (p.i >= p.tokens.len or !p.tokens[p.i].quoted or p.tokens[p.i].text.len == 0 or std.mem.indexOfScalar(u8, p.tokens[p.i].text, 0) != null) return error.InvalidTableSource;
+                q.filename = p.tokens[p.i].text;
+                p.i += 1;
+                if (!p.accept(")")) return error.InvalidTableSource;
+            }
+        }
         if (p.accept("where")) {
             var predicates: std.ArrayList(Predicate) = .empty;
             while (true) {
@@ -347,4 +359,16 @@ test "parser windows and derived tables" {
     try std.testing.expectEqualStrings("frames", q.source());
     try std.testing.expectEqual(@as(?usize, 10), q.limit);
     try std.testing.expectEqualStrings("lag(frame, 0, null) OVER (PARTITION BY path ORDER BY pts_seconds DESC NULLS LAST)", try q.selects[0].expression.label(arena.allocator()));
+}
+test "file-backed tables preserve quoted paths through subqueries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const q = try parse(a, "SELECT * FROM (SELECT frame FROM frames('/tmp/it''s a video.mp4')) AS f LIMIT 1");
+    try std.testing.expectEqualStrings("frames", q.source());
+    try std.testing.expectEqualStrings("/tmp/it's a video.mp4", q.sourceFile().?);
+    try std.testing.expectEqual(@as(?[]const u8, null), (try parse(a, "SELECT * FROM frames")).sourceFile());
+    for ([_][]const u8{ "frames()", "frames('')", "frames(42)", "frames(null)", "frames('a', 'b')" }) |source| {
+        try std.testing.expectError(error.InvalidTableSource, parse(a, try std.fmt.allocPrint(a, "SELECT * FROM {s}", .{source})));
+    }
 }
