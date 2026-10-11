@@ -15,6 +15,7 @@ const frameRows = new Map(), queueRows = new Map();
 let currentMasks = null;
 let queryController = null;
 let resultView = "table", graphAxesChosen = false, graphColumns = "";
+let renderRequest = null;
 const frameValues = row => Object.values(row || {}).filter(v => v && typeof v === "object" && v.type === "frame" && v.id);
 function message(text, kind = "") { $("message").textContent = text; $("message").className = "message " + kind; }
 function text(tag, value, className) { const el = document.createElement(tag); el.textContent = value; if (className) el.className = className; return el; }
@@ -79,7 +80,20 @@ function renderTable() {
   });
   function allState() { const all = head.querySelector("input"); if (!all) return; const count = result.rows.filter(r => frameValues(r).length).length; all.checked = selection.size === count; all.indeterminate = selection.size > 0 && selection.size < count; }
 }
-function renderResults() { renderTable(); renderGraph(); }
+function renderResults() {
+  $("row-count").textContent = result.rows.length;
+  if (resultView === "table") renderTable();
+  renderGraph();
+}
+function scheduleResults() {
+  if (renderRequest != null) return;
+  renderRequest = requestAnimationFrame(() => { renderRequest = null; renderResults(); updateQueue(false); });
+}
+function flushResults() {
+  if (renderRequest == null) return;
+  cancelAnimationFrame(renderRequest); renderRequest = null;
+  renderResults(); updateQueue(false);
+}
 function inspectGraphRow(index) {
   const frame = frameValues(result.rows[index])[0]; if (!frame) return;
   stop(); const next = queue.findIndex(value => value.id === frame.id);
@@ -102,11 +116,11 @@ function renderGraph() {
   x.disabled = y.disabled = !columns.length;
   if (resultView !== "graph") {
     // Hidden markers must not retain indices into an earlier query's rows.
-    $("graph-plot").replaceChildren(); $("graph-note").textContent = "";
+    ResultGraph.clear($("graph-plot")); $("graph-note").textContent = "";
     return;
   }
   const chart = ResultGraph.render($("graph-plot"), result, x.value, y.value, inspectGraphRow);
-  $("graph-note").textContent = chart.plotted.length ? `${chart.plotted.length} points · hover for values${result.rows.some(row => frameValues(row).length) ? " · click to preview" : ""}` : "";
+  $("graph-note").textContent = chart.plotted.length ? `${chart.plotted.length} points · hover for values${chart.hasFrames ? " · click to preview" : ""}` : "";
 }
 function setResultView(view) {
   resultView = view;
@@ -117,7 +131,7 @@ function setResultView(view) {
     $("view-" + name).setAttribute("aria-selected", String(active));
     $("view-" + name).tabIndex = active ? 0 : -1;
   }
-  renderGraph();
+  renderResults();
 }
 function loadImage(frame) {
   if (images.has(frame.id)) return images.get(frame.id);
@@ -193,6 +207,7 @@ async function readQueryStream(sql, signal, receive) {
 }
 async function runQuery() {
   if (queryController) queryController.abort();
+  if (renderRequest != null) { cancelAnimationFrame(renderRequest); renderRequest = null; }
   const controller = new AbortController(); queryController = controller;
   const version = ++generation, started = performance.now(); let firstRow = null;
   previewVersion++; stop(); $("run").disabled = true; $("cancel-query").hidden = false; message("Running query…", "busy");
@@ -210,15 +225,19 @@ async function runQuery() {
         const first = result.rows.length === 0;
         for (const row of event.rows) { const index = result.rows.length; result.rows.push(row); const frames = frameValues(row); if (frames.length) selection.add(index); for (const frame of frames) if (!frameRows.has(frame.id)) frameRows.set(frame.id, row); }
         if (firstRow == null && event.rows.length) firstRow = performance.now() - started;
-        renderResults(); updateQueue(false);
+        scheduleResults();
         const note = $("result-note");
         if (!note.querySelector(".spinner")) {
           const spinner = text("span", "", "spinner"); spinner.setAttribute("aria-hidden", "true");
           note.replaceChildren(spinner, text("span", "Receiving rows", "sr-only"));
         }
         message(`${result.rows.length} rows received${timing()}…`, "busy");
-        if (first && queue.length) show(queue[0], true).catch(error => { if (version === generation) message(`Preview: ${error.message}`, "error"); });
+        if (first) {
+          updateQueue(false);
+          if (queue.length) show(queue[0], true).catch(error => { if (version === generation) message(`Preview: ${error.message}`, "error"); });
+        }
       } else if (event.type === "done") {
+        flushResults();
         $("result-note").textContent = queue.length ? "Select rows for playback · click a frame to inspect" : "Scalar query results";
         message(`${result.rows.length} rows returned${timing()}.`);
       }
@@ -226,6 +245,7 @@ async function runQuery() {
     if (version === generation) await refreshInfo().catch(() => {});
   } catch (error) {
     if (version === generation) {
+      flushResults();
       const canceled = controller.signal.aborted;
       $("result-note").textContent = `${canceled ? "Canceled" : "Incomplete query"} · ${result.rows.length} rows received`;
       message(canceled ? `Query canceled. ${result.rows.length} received rows remain available.` : `${error.message} (${result.rows.length} rows received; result incomplete)`, canceled ? "" : "error");

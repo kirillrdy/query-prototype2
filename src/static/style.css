@@ -122,7 +122,7 @@ select { color: var(--text); background: var(--panel); border: 1px solid var(--e
 .graph-tick { fill: var(--muted); font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
 .graph-axis-label { fill: var(--text); font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 .graph-line { fill: none; stroke: var(--teal); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-.graph-point { fill: var(--teal); stroke: var(--panel); stroke-width: 1; }
+.graph-point { rx: var(--point-rx, 4px); ry: var(--point-ry, 4px); fill: var(--teal); stroke: var(--panel); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .graph-point.interactive { cursor: pointer; }
 .graph-point:hover, .graph-point:focus, .graph-point.active { fill: var(--accent); stroke: var(--accent); stroke-width: 3; outline: none; }
 .graph-empty { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 12px; }

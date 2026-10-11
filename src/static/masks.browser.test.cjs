@@ -84,6 +84,20 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         result.rows.forEach((row, index) => { row.pts_seconds = index; });
         setResultView('graph');
         check($('graph-plot').querySelectorAll('.graph-point').length === 2, 'Previous query graph markers');
+        const originalSvg = $('graph-plot').querySelector('svg'), originalPoint = $('graph-plot').querySelector('.graph-point');
+        originalPoint.focus();
+        const markerWidth = originalPoint.getBoundingClientRect().width;
+        result.rows.push({ frame: { ...result.rows[0].frame, id: 'source-1-3', frame_index: 3, pts_seconds: 3, preview_url: '/frame.svg?index=3' }, pts_seconds: 2 });
+        renderGraph();
+        check($('graph-plot').querySelector('svg') === originalSvg && $('graph-plot').querySelector('.graph-point') === originalPoint, 'Stream update retains SVG and existing point nodes');
+        check(document.activeElement === originalPoint, 'Streaming preserves point focus');
+        check(originalSvg.querySelector('.graph-line').points.numberOfItems === 3, 'Line appends a new point');
+        check(Math.abs(originalPoint.getBoundingClientRect().width - markerWidth) < 0.1, 'Axis expansion preserves marker size');
+        const newestPoint = originalSvg.querySelector('[data-row="2"]');
+        check(newestPoint && Number.isFinite(newestPoint.getBoundingClientRect().x), 'New point is visible after axis expansion');
+        newestPoint.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+        await until(() => $('frame-title').textContent.endsWith('Frame 3') && !$('preview').hidden);
+        check(!$('player-view').hidden, 'Appended point inspects the correct frame');
         setResultView('player');
         $('sql').value = "SELECT frame, sam3(frame, 'hat') AS segmentation FROM frames('fixture.mp4') WHERE frame_index = 3000 LIMIT 1";
         await runQuery();
@@ -108,6 +122,20 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         await fetch('/__release');
         await new Promise(resolve => setTimeout(resolve, 1100));
         check(!playing && position === 0 && $('frame-badge').textContent === 'PTS 4000.000 s', 'Paused playback does not advance when buffered frames arrive');
+        setResultView('graph');
+        const tableBody = $('results').querySelector('tbody'), hiddenTableRow = tableBody.firstElementChild;
+        $('sql').value = "SELECT frame_index, pts_seconds FROM frames('fixture.mp4') LIMIT 1200";
+        const streamed = runQuery();
+        await until(() => $('graph-plot').querySelectorAll('.graph-point').length >= 20);
+        const streamedSvg = $('graph-plot').querySelector('svg'), streamedPoint = streamedSvg.querySelector('.graph-point');
+        streamedPoint.focus();
+        await streamed;
+        check(result.rows.length === 1200 && streamedSvg.querySelectorAll('.graph-point').length === 1200, 'Every streamed point is appended');
+        check($('graph-plot').querySelector('svg') === streamedSvg && streamedSvg.querySelector('.graph-point') === streamedPoint, 'Stream retains SVG and earlier points');
+        check(document.activeElement === streamedPoint, 'Focus survives many streamed batches');
+        check(tableBody.firstElementChild === hiddenTableRow, 'Streaming skips hidden table rendering');
+        setResultView('table');
+        check(tableBody.children.length === 1200, 'Table catches up when selected');
         await fetch('/__report', { method: 'POST', body: JSON.stringify({ ok: true }) });
       } catch (error) { await fetch('/__report', { method: 'POST', body: JSON.stringify({ error: error.message }) }); }
     })();`;
@@ -124,6 +152,18 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
     if (req.url === '/api/query/stream') {
       let data = ''; req.on('data', chunk => { data += chunk; });
       req.on('end', () => {
+        if (JSON.parse(data).sql.includes('LIMIT 1200')) {
+          res.setHeader('content-type', 'application/x-ndjson');
+          res.write(JSON.stringify({ type: 'schema', columns: ['frame_index', 'pts_seconds'] }) + '\n');
+          let index = 0;
+          const batch = () => {
+            const selected = Array.from({ length: 20 }, () => { index++; return { frame_index: index, pts_seconds: index / 24 }; });
+            res.write(JSON.stringify({ type: 'rows', rows: selected }) + '\n');
+            if (index === 1200) res.end(JSON.stringify({ type: 'done' }) + '\n');
+            else setTimeout(batch, 20);
+          };
+          batch(); return;
+        }
         const singleFrame = JSON.parse(data).sql.includes('frame_index = 3000');
         const streaming = JSON.parse(data).sql.includes('frame_index >= 4000');
         const selected = streaming ? Array.from({ length: 43 }, (_, index) => ({ frame: frame(4000 + index) })) : singleFrame ? [{ frame: frame(3000), segmentation: seg([0, 4, 4]) }] : rows;

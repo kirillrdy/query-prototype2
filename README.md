@@ -61,8 +61,9 @@ frame metadata, speed, playback order, and the binary download.
 Playback starts with the first frame and buffers two frames ahead, decoding
 previews on demand instead of preparing the entire selection.
 Playback can follow presentation order or result order, with scrubbing, speed
-controls, and single-frame stepping. **Graph** plots numeric fields as results
-arrive.
+controls, and single-frame stepping. **Graph** appends numeric points as results
+arrive, keeping existing points and keyboard focus. Updates are batched to screen
+refreshes; the hidden table catches up when you select **Table**.
 SAM3 masks overlay the frame preview automatically when the same row contains
 one frame and a segmentation result. Use **Show masks** and **Opacity** to adjust
 the overlay. Different masks use different colors; with multiple segmentation

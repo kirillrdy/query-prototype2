@@ -39,3 +39,27 @@ test('sorting lines keeps null gaps and source/track boundaries', () => {
   ] };
   assert.deepEqual(plain(graph.model(result, 'x', 'y').segments.map(segment => segment.map(point => point.index))), [[1, 0], [3], [4], [5]]);
 });
+
+test('stream append matches a complete model across out-of-order points, gaps, and new groups', () => {
+  const result = { columns: ['x', 'y'], rows: [{ x: 2, y: 20, path: 'a' }, { x: 1, y: 10, path: 'a' }] };
+  const chart = graph.model(result, 'x', 'y'), first = chart.plotted[0], segment = chart.segments[0];
+  result.rows.push({ x: 1.5, y: 15, path: 'a' }, { x: 3, y: null, path: 'a' }, { x: 3, y: 30, path: 'a' }, { x: 1, y: 50, path: 'b' });
+  const added = graph.append(chart, result), complete = graph.model(result, 'x', 'y');
+  assert.equal(chart.plotted[0], first);
+  assert.equal(chart.segments[0], segment);
+  assert.deepEqual(plain(added.map(item => item.point.index)), [2, 4, 5]);
+  for (const field of ['points', 'plotted', 'segments', 'xRange', 'yRange']) assert.deepEqual(plain(chart[field]), plain(complete[field]));
+  assert.deepEqual(plain(graph.append(chart, result)), []);
+});
+
+test('numeric column discovery reads only new rows during a stream', () => {
+  let reads = 0;
+  const row = x => ({ get x() { reads++; return x; } });
+  const result = { columns: ['x'], rows: [row(null)] };
+  assert.deepEqual(plain(graph.numericColumns(result)), []);
+  result.rows.push(row(5));
+  assert.deepEqual(plain(graph.numericColumns(result)), ['x']);
+  assert.equal(reads, 2);
+  graph.numericColumns(result);
+  assert.equal(reads, 2);
+});
