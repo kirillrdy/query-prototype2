@@ -33,7 +33,7 @@ const FrameTable = struct {
         server.mutex.lockUncancelable(server.io);
         defer server.mutex.unlock(server.io);
         var buf: [128]u8 = undefined;
-        const key = std.fmt.bufPrint(&buf, "{s}-{d}-{d}", .{ src.id, v.frame.track_id, v.frame.sample_index }) catch unreachable;
+        const key = std.fmt.bufPrint(&buf, "{s}-{d}-{d}", .{ src.id, v.frame.track_id, v.frame.frame_index }) catch unreachable;
         if (src.frames.get(key)) |f| return .{ .frame = f };
         const a = src.arena.allocator();
         const id = a.dupe(u8, key) catch return .null;
@@ -241,7 +241,7 @@ const Server = struct {
             var headers: std.ArrayList(std.http.Header) = .empty;
             try headers.appendSlice(a, options("application/octet-stream", .ok).extra_headers);
             try headers.append(a, .{ .name = "accept-ranges", .value = "bytes" });
-            try headers.append(a, .{ .name = "content-disposition", .value = try std.fmt.allocPrint(a, "attachment; filename=\"track-{d}-sample-{d}.bin\"", .{ f.track_id, f.sample_index }) });
+            try headers.append(a, .{ .name = "content-disposition", .value = try std.fmt.allocPrint(a, "attachment; filename=\"track-{d}-sample-{d}.bin\"", .{ f.track_id, f.frame_index }) });
             if (range != null) try headers.append(a, .{ .name = "content-range", .value = try std.fmt.allocPrint(a, "bytes {d}-{d}/{d}", .{ selected.start, selected.start + selected.length - 1, f.size }) });
             var buffer: [8192]u8 = undefined;
             var body = try request.respondStreaming(&buffer, .{ .content_length = selected.length, .respond_options = .{ .status = if (range == null) .ok else .partial_content, .keep_alive = false, .extra_headers = headers.items } });
@@ -256,7 +256,13 @@ const Server = struct {
             }
             try body.end();
         } else {
-            const path = try s.runtime.path(a, f, .preview);
+            setDeadline(c);
+            try lockWithControl(&s.inference_mutex, c);
+            const path = s.runtime.decode(a, c, f, .preview) catch |err| {
+                s.inference_mutex.unlock(s.io);
+                return err;
+            };
+            s.inference_mutex.unlock(s.io);
             const bytes = try std.Io.Dir.cwd().readFileAlloc(s.io, path, a, .limited(32 << 20));
             try respond(request, bytes, "image/jpeg", .ok);
         }

@@ -97,7 +97,7 @@ pub const Runtime = struct {
     pub fn id(a: A, f: t.Frame) ![]const u8 {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(f.source, &hash, .{});
-        return std.fmt.allocPrint(a, "{s}-{d}-{d}", .{ std.fmt.bytesToHex(hash[0..16].*, .lower), f.track_id, f.sample_index });
+        return std.fmt.allocPrint(a, "{s}-{d}-{d}", .{ std.fmt.bytesToHex(hash[0..16].*, .lower), f.track_id, f.frame_index });
     }
     pub fn path(r: *Runtime, a: A, frame: t.Frame, representation: Representation) ![]const u8 {
         const key = try id(a, frame);

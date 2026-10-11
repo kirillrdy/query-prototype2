@@ -16,7 +16,7 @@ button, a, .upload, summary { touch-action: manipulation; }
 button, .upload, .path-picker > summary { cursor: pointer; border: 1px solid var(--edge); border-radius: 4px; color: var(--text); background: var(--panel); padding: 7px 11px; }
 button:hover, .upload:hover, .path-picker > summary:hover { background: var(--bg); }
 button:disabled { opacity: .4; cursor: default; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 [hidden] { display: none !important; }
 main { min-height: 100dvh; }
 .workspace { display: flex; flex-direction: column; gap: 14px; min-width: 0; height: 100dvh; overflow: auto; padding: 20px; }
@@ -41,7 +41,7 @@ main { min-height: 100dvh; }
 .editor-panel { flex-shrink: 0; border: 1px solid var(--edge); border-radius: 4px; background: var(--panel); overflow: hidden; }
 .section-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 0; font-size: 12px; color: var(--muted); }
 .shortcut { font-size: 10px; color: var(--muted); }
-textarea { display: block; resize: vertical; width: 100%; min-height: 125px; border: 0; padding: 12px 16px 16px; background: transparent; color: var(--teal); font: 13px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; outline-offset: -4px; }
+textarea { display: block; resize: vertical; width: 100%; min-height: 125px; border: 0; padding: 12px 16px 16px; background: transparent; color: var(--teal); font: 13px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; outline: none; }
 .query-footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--edge); }
 .examples { display: flex; gap: 6px; flex-wrap: wrap; }
 .examples button { font-size: 11px; padding: 5px 8px; color: var(--muted); background: transparent; }

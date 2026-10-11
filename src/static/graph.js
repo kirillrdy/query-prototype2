@@ -9,7 +9,7 @@ window.ResultGraph = (() => {
     return Number(value.toPrecision(5)).toLocaleString("en-US", { maximumFractionDigits: 8 });
   };
   function defaults(columns) {
-    const x = ["pts_seconds", "dts_seconds", "sample_index"].find(column => columns.includes(column)) || "";
+    const x = ["pts_seconds", "dts_seconds", "frame_index"].find(column => columns.includes(column)) || "";
     const y = columns.find(column => /motion|score/i.test(column) && column !== x) || columns.find(column => column !== x) || columns[0] || "";
     return { x: y === x ? "" : x, y };
   }

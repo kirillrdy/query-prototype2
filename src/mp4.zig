@@ -7,7 +7,7 @@ pub const schemas = .{
     .files = &[_][]const u8{ "path", "format", "size", "major_brand", "duration_seconds", "track_count" },
     .tracks = &[_][]const u8{ "path", "track_id", "handler", "codec", "width", "height", "timescale", "duration_seconds" },
     .boxes = &[_][]const u8{ "path", "box_path", "type", "offset", "size", "depth" },
-    .frames = &[_][]const u8{ "path", "track_id", "sample_index", "dts_seconds", "pts_seconds", "duration_seconds", "size", "is_keyframe", "offset", "frame" },
+    .frames = &[_][]const u8{ "path", "track_id", "frame_index", "dts_seconds", "pts_seconds", "duration_seconds", "size", "is_keyframe", "offset", "frame" },
 };
 pub fn schema(name: []const u8) ?[]const []const u8 {
     inline for (@typeInfo(@TypeOf(schemas)).@"struct".field_names) |f| {
@@ -67,7 +67,7 @@ const IndexedTrack = struct {
             9 => if (s.id != null and s.locations != null) .{ .frame = .{
                 .source = s.path,
                 .track_id = s.id.?,
-                .sample_index = i + 1,
+                .frame_index = i + 1,
                 .offset = s.locations.?[i],
                 .size = s.sizes[i],
                 .pts_seconds = pts,

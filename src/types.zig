@@ -3,7 +3,7 @@ pub const Allocator = std.mem.Allocator;
 pub const Frame = struct {
     source: []const u8,
     track_id: u32,
-    sample_index: usize,
+    frame_index: usize,
     offset: u64,
     size: u32,
     pts_seconds: f64,
@@ -17,7 +17,7 @@ pub const Frame = struct {
         try j.beginObject();
         try j.objectField("type");
         try j.write("frame");
-        inline for (.{ "source", "track_id", "sample_index", "offset", "size", "pts_seconds", "duration_seconds" }) |field| {
+        inline for (.{ "source", "track_id", "frame_index", "offset", "size", "pts_seconds", "duration_seconds" }) |field| {
             try j.objectField(field);
             try j.write(@field(f, field));
         }
@@ -153,7 +153,7 @@ pub fn env(name: [:0]const u8) ?[]const u8 {
 test "structured function results preserve JSON state in rows" {
     const mask = Value{ .json = "{\"count\":1,\"masks\":[{\"score\":0.9,\"rle\":[0,2]}]}" };
     const rows = [_][]const Value{ &.{ .{ .int = 3000 }, mask, .{ .boolean = true } }, &.{ .{ .int = 3001 }, .{ .json = "{\"count\":0,\"masks\":[]}" }, .{ .boolean = false } } };
-    const result = Result{ .columns = &.{ "sample_index", "segmentation", "after_mask" }, .rows = &rows };
+    const result = Result{ .columns = &.{ "frame_index", "segmentation", "after_mask" }, .rows = &rows };
     inline for (.{ std.json.Stringify.Options{}, std.json.Stringify.Options{ .whitespace = .indent_2 } }) |options| {
         const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, result, options);
         defer std.testing.allocator.free(encoded);

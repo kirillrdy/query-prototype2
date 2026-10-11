@@ -8,9 +8,12 @@ const { spawn } = require('node:child_process');
 
 test('frame preview overlays masks, changes prompt, and clears them when stepping', { timeout: 30000 }, async () => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bquery-mask-browser-'));
-  const frame = index => ({ type: 'frame', id: 'source-1-' + index, source: 'fixture.mp4', track_id: 1, sample_index: index, pts_seconds: index, duration_seconds: 1, size: 100, preview_url: '/frame.svg', raw_url: '/raw' });
+  const frame = index => ({ type: 'frame', id: 'source-1-' + index, source: 'fixture.mp4', track_id: 1, frame_index: index, pts_seconds: index, duration_seconds: 1, size: 100, preview_url: '/frame.svg?index=' + index, raw_url: '/raw' });
   const seg = (...runs) => ({ count: runs.length, width: 4, height: 2, masks: runs.map(rle => ({ score: 0.9, rle })) });
   const rows = [{ frame: frame(1), segmentation: seg([0, 1, 7], [7, 1]), alternative: seg([0, 8]) }, { frame: frame(2), segmentation: seg() }];
+  const requested = [], held = [];
+  let renderCalls = 0;
+  const image = res => { res.setHeader('content-type', 'image/svg+xml'); res.end('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="blue"/></svg>'); };
   let report;
   const reported = new Promise(resolve => { report = resolve; });
   const browserCheck = `
@@ -76,7 +79,7 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         setResultView('graph');
         check($('graph-plot').querySelectorAll('.graph-point').length === 2, 'Previous query graph markers');
         setResultView('player');
-        $('sql').value = "SELECT frame, sam3(frame, 'hat') AS segmentation FROM frames WHERE sample_index = 3000 LIMIT 1";
+        $('sql').value = "SELECT frame, sam3(frame, 'hat') AS segmentation FROM frames WHERE frame_index = 3000 LIMIT 1";
         await runQuery();
         await until(() => !$('mask-controls').hidden || $('message').classList.contains('error'));
         check(!$('message').classList.contains('error'), 'Single-frame query preview: ' + $('message').textContent);
@@ -84,6 +87,21 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         inspectGraphRow(1); // A queued click from an old chart is harmless.
         setResultView('graph');
         check(!$('graph-plot').querySelector('.graph-point'), 'Graph shows only the new query results');
+        // Later previews stay blocked while the first selected frame plays.
+        $('sql').value = 'SELECT frame FROM frames WHERE frame_index >= 4000 LIMIT 43';
+        await runQuery();
+        await until(() => $('frame-badge').textContent === 'PTS 4000.000 s');
+        const playback = play();
+        await until(() => playing && !$('player-view').hidden);
+        await playback;
+        check($('message').textContent === 'Playing 43 selected frames.', 'Playback starts without preparing the selection');
+        const status = await (await fetch('/__status')).json();
+        check(status.renderCalls === 0, 'No bulk render requests');
+        check(status.requested.includes(4000) && status.requested.every(index => index <= 4002), 'Only the current frame and bounded lookahead are requested');
+        stop();
+        await fetch('/__release');
+        await new Promise(resolve => setTimeout(resolve, 1100));
+        check(!playing && position === 0 && $('frame-badge').textContent === 'PTS 4000.000 s', 'Paused playback does not advance when buffered frames arrive');
         await fetch('/__report', { method: 'POST', body: JSON.stringify({ ok: true }) });
       } catch (error) { await fetch('/__report', { method: 'POST', body: JSON.stringify({ error: error.message }) }); }
     })();`;
@@ -94,16 +112,25 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
       let data = ''; req.on('data', chunk => { data += chunk; }); req.on('end', () => { report(JSON.parse(data)); res.end('ok'); }); return;
     }
     if (req.url === '/api/info') return json({ decoder_available: true, sources: [] });
-    if (req.url === '/api/render') return json({ ready: true });
+    if (req.url === '/api/render') { renderCalls++; return json({ ready: true }); }
+    if (req.url === '/__status') return json({ renderCalls, requested });
+    if (req.url === '/__release') { held.splice(0).forEach(image); return json({ ready: true }); }
     if (req.url === '/api/query/stream') {
       let data = ''; req.on('data', chunk => { data += chunk; });
       req.on('end', () => {
-        const singleFrame = JSON.parse(data).sql.includes('sample_index = 3000');
+        const singleFrame = JSON.parse(data).sql.includes('frame_index = 3000');
+        const streaming = JSON.parse(data).sql.includes('frame_index >= 4000');
+        const selected = streaming ? Array.from({ length: 43 }, (_, index) => ({ frame: frame(4000 + index) })) : singleFrame ? [{ frame: frame(3000), segmentation: seg([0, 4, 4]) }] : rows;
         res.setHeader('content-type', 'application/x-ndjson');
-        res.end([{ type: 'schema', columns: singleFrame ? ['frame', 'segmentation'] : ['frame', 'segmentation', 'alternative'] }, { type: 'rows', rows: singleFrame ? [{ frame: frame(3000), segmentation: seg([0, 4, 4]) }] : rows }, { type: 'done' }].map(JSON.stringify).join('\n') + '\n');
+        res.end([{ type: 'schema', columns: streaming ? ['frame'] : singleFrame ? ['frame', 'segmentation'] : ['frame', 'segmentation', 'alternative'] }, { type: 'rows', rows: selected }, { type: 'done' }].map(JSON.stringify).join('\n') + '\n');
       }); return;
     }
-    if (req.url === '/frame.svg') { res.setHeader('content-type', 'image/svg+xml'); return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><rect width="120" height="60" fill="blue"/></svg>'); }
+    if (req.url.startsWith('/frame.svg?index=')) {
+      const index = Number(new URL(req.url, 'http://localhost').searchParams.get('index'));
+      if (index >= 4000) requested.push(index);
+      if (index > 4000) { held.push(res); return; }
+      return image(res);
+    }
     if (req.url === '/overlay-check.js') { res.setHeader('content-type', 'text/javascript'); return res.end(browserCheck); }
     if (req.url === '/') {
       res.setHeader('content-type', 'text/html'); return res.end(fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8').replace('</head>', '<script defer src="/overlay-check.js"></script></head>'));
@@ -126,6 +153,7 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
   } finally {
     clearTimeout(timer);
     if (browser && browser.exitCode === null) { browser.kill('SIGTERM'); await new Promise(resolve => browser.once('exit', resolve)); }
+    server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
     fs.rmSync(profile, { recursive: true, force: true });
   }

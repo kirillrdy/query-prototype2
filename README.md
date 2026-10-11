@@ -13,7 +13,7 @@ SAM3 dependency is declared in `build.zig.zon`; adjust its path if necessary.
 ```sh
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/bquery-web video.mp4 other.mov
-./zig-out/bin/bquery -query 'SELECT path, sample_index, pts_seconds FROM frames LIMIT 10' video.mp4
+./zig-out/bin/bquery -query 'SELECT path, frame_index, pts_seconds FROM frames LIMIT 10' video.mp4
 
 # Build and run directly:
 zig build run -- -query 'SELECT * FROM tracks' video.mp4
@@ -42,7 +42,7 @@ Registration checks only the file and format header. Metadata is indexed when
 you run a query; frame counts appear after the first frame query.
 
 ```sql
-SELECT frame, path, sample_index, pts_seconds
+SELECT frame, path, frame_index, pts_seconds
 FROM frames
 WHERE pts_seconds >= 0.5 AND pts_seconds < 2
 LIMIT 100
@@ -55,6 +55,8 @@ for an image sequence, without audio. Switching tabs preserves the selection
 and pauses playback when leaving the player.
 Player keeps the frame, masks, and playback bar visible. Expand **Details** for
 frame metadata, speed, playback order, and the binary download.
+Playback starts with the first frame and buffers two frames ahead, decoding
+previews on demand instead of preparing the entire selection.
 Playback can follow presentation order or result order, with scrubbing, speed
 controls, and single-frame stepping. **Graph** plots numeric fields as results
 arrive.
@@ -114,7 +116,7 @@ frame cell. The segmentation alias is arbitrary; no additional SQL is needed:
 ```sql
 SELECT frame, sam3(frame, 'hat') AS segmentation
 FROM frames
-WHERE sample_index = 3000
+WHERE frame_index = 3000
 LIMIT 1
 ```
 
@@ -130,7 +132,7 @@ to change the default acceptance threshold of `0.5`.
 SELECT frame, pts_seconds,
        motion(frame, LAG(frame) OVER (
          PARTITION BY path, track_id
-         ORDER BY pts_seconds, sample_index
+         ORDER BY pts_seconds, frame_index
        )) AS motion_score
 FROM frames
 ORDER BY path, track_id, pts_seconds
@@ -160,7 +162,7 @@ FROM (
   SELECT frame, pts_seconds,
          LAG(frame) OVER (
            PARTITION BY path, track_id
-           ORDER BY pts_seconds, sample_index
+           ORDER BY pts_seconds, frame_index
          ) AS previous_frame
   FROM frames
 ) AS sequenced
@@ -219,7 +221,7 @@ inference work is serialized; models run inside the query process.
 | `files` | `path`, `format`, `size`, `major_brand`, `duration_seconds`, `track_count` |
 | `tracks` | `path`, `track_id`, `handler`, `codec`, `width`, `height`, `timescale`, `duration_seconds` |
 | `boxes` | `path`, `box_path`, `type`, `offset`, `size`, `depth` |
-| `frames` | `path`, `track_id`, `sample_index`, `dts_seconds`, `pts_seconds`, `duration_seconds`, `size`, `is_keyframe`, `offset`, `frame` |
+| `frames` | `path`, `track_id`, `frame_index`, `dts_seconds`, `pts_seconds`, `duration_seconds`, `size`, `is_keyframe`, `offset`, `frame` |
 
 Offsets/sizes are bytes, dimensions are pixels, and durations are seconds.
 Handlers are four-byte codes (`vide`, `soun`); codecs are the first sample-entry

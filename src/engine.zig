@@ -376,7 +376,7 @@ test "streamed query rows serialize structured mask values" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const data = t.Result{ .columns = &.{ "sample_index", "segmentation" }, .rows = &.{&.{ .{ .int = 3000 }, .{ .json = "{\"count\":1,\"masks\":[{\"rle\":[0,2]}]}" } }} };
+    const data = t.Result{ .columns = &.{ "frame_index", "segmentation" }, .rows = &.{&.{ .{ .int = 3000 }, .{ .json = "{\"count\":1,\"masks\":[{\"rle\":[0,2]}]}" } }} };
     var tables = t.Tables.init(a);
     try tables.put("frames", data.table());
     const Stream = struct {
@@ -394,6 +394,6 @@ test "streamed query rows serialize structured mask values" {
         }
     };
     var stream = Stream{ .a = a };
-    _ = try execute(a, .{ .io = std.testing.io }, try parse(a, "SELECT sample_index, segmentation FROM frames WHERE sample_index = 3000 LIMIT 1"), tables, Functions.init(a), .{ .context = &stream, .send = Stream.send });
+    _ = try execute(a, .{ .io = std.testing.io }, try parse(a, "SELECT frame_index, segmentation FROM frames WHERE frame_index = 3000 LIMIT 1"), tables, Functions.init(a), .{ .context = &stream, .send = Stream.send });
     try std.testing.expectEqual(@as(usize, 1), stream.rows);
 }

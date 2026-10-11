@@ -343,7 +343,7 @@ pub fn number(s: []const u8) !t.Value {
 test "parser windows and derived tables" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const q = try parse(arena.allocator(), "SELECT LAG(frame, 0, null) OVER (PARTITION BY path ORDER BY pts_seconds DESC NULLS LAST) AS previous FROM (SELECT * FROM frames) AS f WHERE sample_index NOT BETWEEN 2 AND 5 LIMIT 10 OFFSET 1");
+    const q = try parse(arena.allocator(), "SELECT LAG(frame, 0, null) OVER (PARTITION BY path ORDER BY pts_seconds DESC NULLS LAST) AS previous FROM (SELECT * FROM frames) AS f WHERE frame_index NOT BETWEEN 2 AND 5 LIMIT 10 OFFSET 1");
     try std.testing.expectEqualStrings("frames", q.source());
     try std.testing.expectEqual(@as(?usize, 10), q.limit);
     try std.testing.expectEqualStrings("lag(frame, 0, null) OVER (PARTITION BY path ORDER BY pts_seconds DESC NULLS LAST)", try q.selects[0].expression.label(arena.allocator()));
