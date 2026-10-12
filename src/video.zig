@@ -2,7 +2,7 @@ const std = @import("std");
 const sam3 = @import("sam3");
 const t = @import("types.zig");
 const engine = @import("engine.zig");
-const ort = @import("ort.zig");
+const detection = @import("detection.zig");
 const A = std.mem.Allocator;
 const V = t.Value;
 const File = std.Io.File;
@@ -50,7 +50,7 @@ pub const Runtime = struct {
     embedding_key: ?[]const u8 = null,
     features: std.StringHashMap([]f32),
     results: std.StringHashMap(SamCache),
-    detector: ?ort.Detector = null,
+    detector: ?detection.Detector = null,
     detector_key: ?[]const u8 = null,
     person_indexes: person_index.Store,
     counts: std.StringHashMap(Counts),
@@ -390,7 +390,7 @@ pub const Runtime = struct {
         if (r.detector == null) {
             const model = if (t.env("BQUERY_DETECTION_MODEL")) |path_| path_ else try r.modelPath(a, control);
             if (!std.ascii.endsWithIgnoreCase(model, ".onnx")) return error.ExpectedONNXModel;
-            r.detector = try ort.Detector.open(a, r.io, model, try @import("detection_assets.zig").runtimePath(r, a, control));
+            r.detector = try detection.Detector.open(r.a, r.io, model);
             r.detector_key = try r.a.dupe(u8, config);
         }
         const png = try r.decode(a, control, f, .detection);

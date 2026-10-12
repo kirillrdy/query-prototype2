@@ -4,6 +4,10 @@
     .fingerprint = 0x736894412beed1a6,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
+        .onnx = .{
+            .url = "git+https://github.com/kirillrdy/onnx#9e331085e51da1bd65014d3decf236c7c07d3d89",
+            .hash = "onnx-0.0.0-S9CpBUNECQBWzjciLVDlH_zHKeoLQYV-qJcQrq6mUK-6",
+        },
         .sam3 = .{
             .url = "git+https://github.com/kirillrdy/sam3#797290ceccc0866579791b3d02af079dc7db3fff",
             .hash = "sam3-0.0.0-arUZ_gHsAABooVd-p-Xr82JU4JYWhbJ3Dt3G4EUN-pIv",

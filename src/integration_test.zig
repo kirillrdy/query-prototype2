@@ -60,7 +60,7 @@ test "SAM3 directly segments an exact video sample" {
         try std.testing.expectEqual(@as(u64, @intCast(masks.width * masks.height)), pixels);
     }
 }
-test "CPU object detection runs without a SAM3 worker" {
+test "native Zig ONNX object detection runs without a SAM3 worker" {
     const path = t.env("BQUERY_TEST_DETECTION_VIDEO") orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

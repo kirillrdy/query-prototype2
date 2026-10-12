@@ -9,6 +9,8 @@ inside the CLI/server process; no SAM3 worker or Python service is needed.
 
 Use Zig 0.17. The SAM3 dependency is pinned to a GitHub commit in
 `build.zig.zon` and downloaded automatically by Zig on the first build.
+The shared native ONNX runtime is pinned separately in `build.zig.zon`, including
+the interior-axis Softmax support required by YOLO11n.
 
 ```sh
 git clone https://github.com/kirillrdy/query.git
@@ -27,7 +29,7 @@ zig build -Doptimize=ReleaseFast -Dbackend=cuda -Dsm=sm_89
 
 Both executables are native Zig. Metadata and encoded-byte downloads work
 without FFmpeg or an initialized GPU. Previews, motion, and inference over
-frames require `ffmpeg` and `ffprobe` on PATH. SAM3 requires a working GPU for
+frames require `ffmpeg` and `ffprobe` on PATH. SAM3 and object detection require a working GPU for
 the selected backend. Its model assets are loaded lazily, with missing files
 downloaded using curl into `~/.cache/sam3-zig` on first inference.
 
@@ -283,16 +285,19 @@ ORDER BY path, pts_seconds
 LIMIT 10
 ```
 
-YOLO11n runs locally on CPU through direct Zig bindings to ONNX Runtime.
-The first detection query downloads the model and official runtime library,
-verifies pinned SHA-256 checksums, and caches them in
-`~/.cache/binaryquery/detection` (or the XDG cache directory). Downloads use curl
-and runtime extraction uses tar. Later queries run offline. Automatic assets
-support Linux and macOS on amd64 and arm64. The model recognizes 80 COCO classes.
+YOLO11n runs locally through the native Zig ONNX runtime also used by SAM3,
+with the OpenCL, Metal, or CUDA backend selected at build time. Detection requires
+a working GPU for that backend. The first detection query downloads the model,
+verifies its pinned SHA-256 checksum, and caches it in
+`~/.cache/binaryquery/detection` (or the XDG cache directory). Downloads use curl;
+later queries run offline. The model recognizes 80 COCO classes. Custom models
+must use operators supported by the native runtime. Existing person-count
+indexes from the C runtime must be rebuilt because the inference backend and
+precision can affect counts near the confidence threshold.
 
 Optional environment overrides:
 
-- `BQUERY_DETECTION_CACHE`: directory for model/runtime assets.
+- `BQUERY_DETECTION_CACHE`: directory for model assets.
 - `BQUERY_DETECTION_CONFIDENCE`: threshold in `(0, 1]`, default `0.25`.
 - `BQUERY_DETECTION_MODEL`: local ONNX model with one RGB NCHW `[1,3,640,640]`
   input and output `[1,84,N]` or `[1,N,6]`.
@@ -365,7 +370,7 @@ partial results. The existing workbench uses the streaming endpoint.
 - `src/mp4.zig`: bounded box traversal, headers, sample timing/byte locations.
 - `src/parse.zig`, `src/engine.zig`: SQL, validation, windows, filtering, ordering.
 - `src/video.zig`: exact-sample decoding, motion, direct SAM3, object detection.
-- `src/ort.zig`, `src/detection_assets.zig`: native CPU runtime and verified assets.
+- `src/detection.zig`: object detection through the native Zig ONNX runtime.
 - `src/web.zig`, `src/static/`: localhost API and embedded workbench.
 - `src/main.zig`, `src/web_main.zig`: executable entry points.
 
@@ -387,7 +392,8 @@ node --test src/static/graph.test.cjs
 # Optional preview interaction test (also needs Firefox):
 node src/static/masks.browser.test.cjs
 
-# Optional real-model checks (GPU required for SAM3):
+# GPU numerical regression tests run with zig build test.
+# Optional real-model checks:
 BQUERY_TEST_SAM3_VIDEO=/path/to/video.mp4 zig build test
 BQUERY_TEST_DETECTION_VIDEO=/path/to/video.mp4 zig build test
 # Optional batched-motion equivalence check (needs FFmpeg/FFprobe):

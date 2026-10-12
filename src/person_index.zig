@@ -99,7 +99,8 @@ pub const Store = struct {
             const stat = try std.Io.Dir.cwd().statFile(io, abs, .{});
             break :blk try std.fmt.allocPrint(a, "{s}:{d}:{d}", .{ abs, stat.size, stat.mtime.nanoseconds });
         } else "yolo11n:634279b40c07c6391472c51ad45b81ebc48706a9a1fe72dd3396322acd0c053b";
-        return digest(a, try std.fmt.allocPrint(a, "person-index-v1:ort-1.23.2:letterbox-640:nms-v1:{s}:{d}", .{ model, @as(u32, @bitCast(threshold)) }));
+        const onnx = @import("onnx");
+        return digest(a, try std.fmt.allocPrint(a, "person-index-v1:onnx-9e331085:{s}:{s}:letterbox-640:nms-v1:{s}:{d}", .{ onnx.version(), @typeName(onnx.Element), model, @as(u32, @bitCast(threshold)) }));
     }
     pub fn identity(s: *Store, a: A, source: []const u8, config: []const u8) ![]const u8 {
         const abs = try std.Io.Dir.cwd().realPathFileAlloc(s.io, source, a);
