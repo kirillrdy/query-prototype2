@@ -138,7 +138,7 @@ test('frame preview overlays masks, changes prompt, and clears them when steppin
         check(tableBody.firstElementChild === hiddenTableRow, 'Streaming skips hidden table rendering');
         setResultView('table');
         check(tableBody.children.length === 1200, 'Table catches up when selected');
-        $('sql').value = "CREATE INDEX people ON frames('fixture.mp4') (person_count(frame))";
+        $('sql').value = "CREATE INDEX people ON frames('fixture.mp4') (yolo(frame, 'person'))";
         const building = runQuery();
         await until(() => $('message').textContent.startsWith('Preparing index people'));
         check(!$('message').textContent.includes('100%'), 'Preparation does not pretend the index is complete');

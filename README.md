@@ -176,7 +176,7 @@ Build a reusable index in the SQL console, with `-c`, or in the web query editor
 
 ```sql
 CREATE INDEX people_idx
-ON frames('/home/kirillvr/holes_3min.mp4') (person_count(frame))
+ON frames('/home/kirillvr/holes_3min.mp4') (yolo(frame, 'person'))
 WHERE frame_index <= 100;
 ```
 
@@ -196,9 +196,9 @@ atomically replaces the named index for that video.
 Normal queries automatically use saved counts in both projections and filters:
 
 ```sql
-SELECT frame, path, pts_seconds, person_count(frame) AS people
+SELECT frame, path, pts_seconds, yolo(frame, 'person') AS people
 FROM frames('/home/kirillvr/holes_3min.mp4')
-WHERE frame_index <= 100 AND person_count(frame) > 0
+WHERE frame_index <= 100 AND yolo(frame, 'person') > 0
 ORDER BY path, pts_seconds;
 ```
 
@@ -212,7 +212,7 @@ restart when a loaded source changes on disk.
 
 Indexes are stored under `$XDG_CACHE_HOME/binaryquery/indexes` (default
 `~/.cache/binaryquery/indexes`); `BQUERY_INDEX_CACHE` overrides this directory.
-Only `person_count(frame)` is supported currently. The index stores computed
+Only person counts, written as `yolo(frame, 'person')`, can be indexed currently. The index stores computed
 values to avoid repeated inference; metadata scans and sorting still run.
 
 ### Motion and windows
@@ -272,15 +272,16 @@ NULLS FIRST/LAST; defaults are LAST for ASC and FIRST for DESC.
 
 ### Object detection
 
-`person_count(frame)` counts people; `object_count(frame, 'car')` counts a
-case-insensitive COCO class. Unknown classes produce errors; null arguments
+`yolo(frame, 'person')` counts people; `yolo(frame, 'car')` counts cars. The
+second argument accepts any case-insensitive COCO class. Unknown classes produce errors; null arguments
 return null. Counts describe each picture, not unique objects across a video.
+`person_count(frame)` and `object_count(frame, class)` remain compatible aliases.
 
 ```sql
-SELECT frame, path, pts_seconds, person_count(frame) AS people
+SELECT frame, path, pts_seconds, yolo(frame, 'person') AS people
 FROM frames('video.mp4')
 WHERE pts_seconds >= 60 AND pts_seconds < 70
-  AND person_count(frame) > 0
+  AND yolo(frame, 'person') > 0
 ORDER BY path, pts_seconds
 LIMIT 10
 ```
@@ -301,10 +302,17 @@ Optional environment overrides:
 - `BQUERY_DETECTION_CONFIDENCE`: threshold in `(0, 1]`, default `0.25`.
 - `BQUERY_DETECTION_MODEL`: local ONNX model with one RGB NCHW `[1,3,640,640]`
   input and output `[1,84,N]` or `[1,N,6]`.
+- `BQUERY_PROFILE_YOLO=1`: log per-frame extraction, JPEG decoding, letterboxing,
+  synchronized inference, and suppression timings to stderr.
 
 Detection uses exact-sample JPEGs, RGB letterboxing, class-aware nonmaximum
 suppression with IoU `0.7`, and at most 300 detections. All class counts are
 cached together for up to 4,096 frames. Source changes are checked on cache hits.
+Frame scans advance through a lazy row iterator. Detection reuses one streaming
+decoder while advancing within a source and track, matching pictures to encoded sample positions.
+The decoder opens only when inference needs a frame and closes when the query
+finishes, reaches its limit, or is canceled. Backward reads reopen at a seek
+anchor; metadata-only scans do not start a decoder.
 
 Cheap input predicates run before inference. With input-field ordering and no
 windows, simple scans stop after enough LIMIT matches. Computed ordering,

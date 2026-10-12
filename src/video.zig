@@ -3,6 +3,7 @@ const sam3 = @import("sam3");
 const t = @import("types.zig");
 const engine = @import("engine.zig");
 const detection = @import("detection.zig");
+const frame_decoder = @import("frame_decoder.zig");
 const A = std.mem.Allocator;
 const V = t.Value;
 const File = std.Io.File;
@@ -38,6 +39,22 @@ const SamTiming = struct {
         self.last = now;
     }
 };
+const YoloTiming = struct {
+    io: std.Io,
+    frame_index: usize,
+    last: i96,
+    enabled: bool,
+    fn init(io: std.Io, frame_index: usize) YoloTiming {
+        const enabled = t.env("BQUERY_PROFILE_YOLO") != null;
+        return .{ .io = io, .frame_index = frame_index, .enabled = enabled, .last = if (enabled) std.Io.Timestamp.now(io, .awake).nanoseconds else 0 };
+    }
+    fn mark(self: *YoloTiming, stage: []const u8) void {
+        if (!self.enabled) return;
+        const now = std.Io.Timestamp.now(self.io, .awake).nanoseconds;
+        std.debug.print("YOLO frame {d} {s}: {d:.3} ms\n", .{ self.frame_index, stage, @as(f64, @floatFromInt(now - self.last)) / std.time.ns_per_ms });
+        self.last = now;
+    }
+};
 pub const Runtime = struct {
     a: A,
     io: std.Io,
@@ -52,6 +69,8 @@ pub const Runtime = struct {
     results: std.StringHashMap(SamCache),
     detector: ?detection.Detector = null,
     detector_key: ?[]const u8 = null,
+    decoder: ?frame_decoder.Decoder = null,
+    decoder_starts: usize = 0,
     person_indexes: person_index.Store,
     counts: std.StringHashMap(Counts),
     pub fn init(a: A, io: std.Io) !Runtime {
@@ -63,6 +82,7 @@ pub const Runtime = struct {
         return .{ .a = a, .io = io, .temp = temp, .signatures = .init(a), .indices = .init(a), .features = .init(a), .results = .init(a), .counts = .init(a), .person_indexes = .init(a, io) };
     }
     pub fn deinit(r: *Runtime) void {
+        r.closeDecoder();
         if (r.embedding) |*e| e.deinit();
         if (r.embedding_key) |key| r.a.free(key);
         if (r.model) |*m| m.deinit();
@@ -102,10 +122,11 @@ pub const Runtime = struct {
     }
     pub fn functions(r: *Runtime, a: A) !engine.Functions {
         var f = engine.Functions.init(a);
-        inline for (.{ .{ "motion", 2, motion }, .{ "person_count", 1, personCount }, .{ "object_count", 2, objectCount }, .{ "sam3", 2, segmentMasks }, .{ "sam3_count", 2, segmentCount }, .{ "sam3_score", 2, segmentScore } }) |entry| {
+        inline for (.{ .{ "motion", 2, motion }, .{ "yolo", 2, objectCount }, .{ "person_count", 1, personCount }, .{ "object_count", 2, objectCount }, .{ "sam3", 2, segmentMasks }, .{ "sam3_count", 2, segmentCount }, .{ "sam3_score", 2, segmentScore } }) |entry| {
             try f.put(entry[0], .{ .arity = entry[1], .context = r, .evaluate = entry[2] });
         }
         f.getPtr("motion").?.prepare = prepareMotion;
+        inline for (.{ "yolo", "person_count", "object_count" }) |name| f.getPtr(name).?.finish_scan = finishDetectionScan;
         f.getPtr("person_count").?.create_index = createPersonIndex;
         f.getPtr("person_count").?.index_identity = personIndexIdentity;
         f.getPtr("person_count").?.show_indexes = showPersonIndexes;
@@ -118,6 +139,26 @@ pub const Runtime = struct {
         if (r.signatures.get(frame.source)) |old| {
             if (old.size != sig.size or old.mtime != sig.mtime) return error.SourceChanged;
         } else try r.signatures.put(try r.a.dupe(u8, frame.source), sig);
+    }
+    pub fn closeDecoder(r: *Runtime) void {
+        if (r.decoder) |*decoder| {
+            if (t.env("BQUERY_PROFILE_YOLO") != null) std.debug.print("YOLO decoder closed: starts={d}, last_frame={d}\n", .{ r.decoder_starts, decoder.last_frame });
+            decoder.deinit();
+        }
+        r.decoder = null;
+    }
+    /// Borrow the next requested picture from the scan's forward decoder.
+    pub fn detectionJpeg(r: *Runtime, control: t.Control, frame: t.Frame) ![]const u8 {
+        try r.checkSource(frame);
+        if (r.decoder) |*decoder| if (!decoder.accepts(frame)) r.closeDecoder();
+        errdefer r.closeDecoder();
+        if (r.decoder == null) {
+            r.decoder = try frame_decoder.Decoder.open(r.a, control, frame);
+            r.decoder_starts += 1;
+        }
+        const bytes = try r.decoder.?.read(control, frame);
+        try r.checkSource(frame);
+        return bytes;
     }
     pub fn id(a: A, f: t.Frame) ![]const u8 {
         var hash: [32]u8 = undefined;
@@ -372,13 +413,19 @@ pub const Runtime = struct {
         timing.mark("mask RLE");
         return result;
     }
-    fn detect(r: *Runtime, a: A, control: t.Control, f: t.Frame) !Counts {
+    fn detect(r: *Runtime, _: A, control: t.Control, f: t.Frame) !Counts {
+        // Images and tensors belong to one iterator step, not the query arena.
+        var arena = std.heap.ArenaAllocator.init(r.a);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var timing = YoloTiming.init(r.io, f.frame_index);
         try r.checkSource(f);
         try control.check();
         const threshold = try confidence("BQUERY_DETECTION_CONFIDENCE", 0.25);
         const config = try person_index.Store.settings(a, r.io, threshold);
         const key = try std.fmt.allocPrint(a, "{s}:{s}", .{ try id(a, f), config });
         if (r.counts.get(key)) |cached| return cached;
+        timing.mark("cache checks");
         if (r.detector_key) |old| {
             if (!std.mem.eql(u8, old, config)) {
                 if (r.detector) |*d| d.deinit();
@@ -393,17 +440,21 @@ pub const Runtime = struct {
             r.detector = try detection.Detector.open(r.a, r.io, model);
             r.detector_key = try r.a.dupe(u8, config);
         }
-        const png = try r.decode(a, control, f, .detection);
-        defer std.Io.Dir.cwd().deleteFile(r.io, png) catch {};
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(r.io, png, a, .limited(32 << 20));
+        timing.mark("model ready");
+        const bytes = try r.detectionJpeg(control, f);
+        timing.mark("frame decode");
         var image = try sam3.decodeImage(a, bytes);
+        timing.mark("JPEG decode");
         defer image.deinit(a);
         const input = try letterbox(a, sam3.RgbImage.fromImage(image), 640);
+        timing.mark("letterbox");
         defer a.free(input);
         const output = try r.detector.?.run(a, input);
+        timing.mark("inference");
         defer a.free(output.data);
         defer a.free(output.shape);
         const counts = try detectionCounts(a, output.data, output.shape, threshold);
+        timing.mark("NMS");
         try control.check();
         try r.checkSource(f);
         if (r.counts.count() >= 4096) {
@@ -428,6 +479,9 @@ pub const Runtime = struct {
         return path_;
     }
 };
+fn finishDetectionScan(ctx: *anyopaque) void {
+    runtime(ctx).closeDecoder();
+}
 fn runtime(ctx: *anyopaque) *Runtime {
     return @ptrCast(@alignCast(ctx));
 }
@@ -496,6 +550,7 @@ fn objectCount(ctx: *anyopaque, a: A, control: t.Control, args: []const V) !V {
         }
     }
     const c = class orelse return error.UnknownObjectClass;
+    if (c == 0) return personCount(ctx, a, control, args[0..1]);
     return .{ .int = (try runtime(ctx).detect(a, control, try asFrame(args[0])))[c] };
 }
 fn motion(ctx: *anyopaque, a: A, control: t.Control, args: []const V) !V {

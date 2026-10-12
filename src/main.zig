@@ -30,7 +30,7 @@ fn execute(a: A, io: std.Io, video: *q.video.Runtime, sql: []const u8, files: []
         break :blk try a.dupe([]const u8, &.{filename});
     } else files;
     if (paths.len == 0 and !parsed.show_indexes) return error.InputFileRequired;
-    if (!parsed.uses(&.{ "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) {
+    if (!parsed.uses(&.{ "yolo", "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) {
         check.deadline_ns = std.Io.Timestamp.now(io, .awake).nanoseconds + 120 * std.time.ns_per_s;
     }
     var tables = q.types.Tables.init(a);

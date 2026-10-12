@@ -185,7 +185,7 @@ const Server = struct {
     fn query(s: *Server, a: A, request: *Request, c: t.Control, streaming: bool) !void {
         const input = try readJSON(struct { sql: []const u8 }, a, request);
         const q = try engine.parse(a, input.sql);
-        if (!q.uses(&.{ "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) setDeadline(c);
+        setQueryDeadline(c, q);
         if (!streaming) {
             const result = try s.executeQuery(a, c, q, null);
             // Keep the original web API's truncated field.
@@ -534,6 +534,30 @@ test "web tables match exported MP4 schemas" {
 fn setDeadline(c: t.Control) void {
     const check: *control_mod.RequestControl = @ptrCast(@alignCast(c.check_context.?));
     check.deadline_ns = std.Io.Timestamp.now(c.io, .awake).nanoseconds + 120 * std.time.ns_per_s;
+}
+
+fn setQueryDeadline(c: t.Control, q: engine.Query) void {
+    if (!q.uses(&.{ "yolo", "person_count", "object_count", "sam3", "sam3_count", "sam3_score" })) setDeadline(c);
+}
+
+test "YOLO inference has no query deadline while metadata queries remain bounded" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{
+        "SELECT yolo(frame, 'car') AS cars FROM frames('video.mp4')",
+        "SELECT frame FROM frames('video.mp4') WHERE yolo(frame, 'car') > 0",
+        "CREATE INDEX people ON frames('video.mp4') (yolo(frame, 'person'))",
+    }) |sql| {
+        var check = control_mod.RequestControl{ .io = std.testing.io };
+        const c = t.Control{ .io = check.io, .check_context = &check, .check_fn = control_mod.RequestControl.canceled };
+        setQueryDeadline(c, try engine.parse(a, sql));
+        try std.testing.expectEqual(@as(?i96, null), check.deadline_ns);
+    }
+    var check = control_mod.RequestControl{ .io = std.testing.io };
+    const c = t.Control{ .io = check.io, .check_context = &check, .check_fn = control_mod.RequestControl.canceled };
+    setQueryDeadline(c, try engine.parse(a, "SELECT frame_index FROM frames('video.mp4')"));
+    try std.testing.expect(check.deadline_ns != null);
 }
 
 const ByteRange = struct { start: u64, length: u64 };

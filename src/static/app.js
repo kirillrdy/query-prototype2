@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const examples = {
   sam3: "SELECT frame, sam3(frame, 'hat') AS segmentation\nFROM frames('filename.mp4')\nWHERE is_keyframe = true\nLIMIT 1",
-  people: "SELECT frame, path, pts_seconds, person_count(frame) AS people\nFROM frames('filename.mp4')\nWHERE frame_index <= 100\n  AND person_count(frame) > 0\nORDER BY path, pts_seconds",
+  people: "SELECT frame, path, pts_seconds, yolo(frame, 'person') AS people\nFROM frames('filename.mp4')\nWHERE frame_index <= 100\n  AND yolo(frame, 'person') > 0\nORDER BY path, pts_seconds",
 	 motion: "SELECT frame, pts_seconds,\n  motion(frame, LAG(frame) OVER (\n    PARTITION BY path, track_id\n    ORDER BY pts_seconds, frame_index\n  )) AS motion_score\nFROM frames('filename.mp4')\nORDER BY path, track_id, pts_seconds\nLIMIT 100",
   mixed: "SELECT frame, path, frame_index, pts_seconds\nFROM frames('filename.mp4')\nLIMIT 48",
   keyframes: "SELECT frame, path, pts_seconds, size\nFROM frames('filename.mp4')\nWHERE is_keyframe = true\nLIMIT 100",

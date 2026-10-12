@@ -69,6 +69,23 @@ pub const Table = struct {
     count: usize,
     context: *const anyopaque,
     get: *const fn (*const anyopaque, usize, usize) Value,
+    pub const Iterator = struct {
+        table: Table,
+        order: ?[]const usize,
+        position: usize = 0,
+        pub fn next(it: *Iterator, control: Control) !?usize {
+            try control.check();
+            const count = if (it.order) |rows| rows.len else it.table.count;
+            if (it.position == count) return null;
+            const row = if (it.order) |rows| rows[it.position] else it.position;
+            it.position += 1;
+            return row;
+        }
+    };
+    /// Rows remain lazy; an ordering stores row indices, never decoded frames.
+    pub fn iterator(table: Table, order: ?[]const usize) Iterator {
+        return .{ .table = table, .order = order };
+    }
     pub fn value(t: Table, row: usize, column: []const u8) Value {
         for (t.columns, 0..) |c, i| {
             if (std.mem.eql(u8, c, column)) return t.get(t.context, row, i);

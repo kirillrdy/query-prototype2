@@ -48,14 +48,14 @@ pub const Store = struct {
             const bytes = dir.readFileAlloc(s.io, entry.name, alloc, .limited(64 << 20)) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => {
-                    try rows.append(a, try a.dupe(t.Value, &.{ .{ .string = try a.dupe(u8, entry.name) }, .null, .{ .string = "person_count(frame)" }, .null, .{ .string = "unreadable" } }));
+                    try rows.append(a, try a.dupe(t.Value, &.{ .{ .string = try a.dupe(u8, entry.name) }, .null, .{ .string = "yolo(frame, 'person')" }, .null, .{ .string = "unreadable" } }));
                     continue;
                 },
             };
             const parsed = std.json.parseFromSlice(Document, alloc, bytes, .{}) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => {
-                    try rows.append(a, try a.dupe(t.Value, &.{ .{ .string = try a.dupe(u8, entry.name) }, .null, .{ .string = "person_count(frame)" }, .null, .{ .string = "corrupt" } }));
+                    try rows.append(a, try a.dupe(t.Value, &.{ .{ .string = try a.dupe(u8, entry.name) }, .null, .{ .string = "yolo(frame, 'person')" }, .null, .{ .string = "corrupt" } }));
                     continue;
                 },
             };
@@ -73,7 +73,7 @@ pub const Store = struct {
             try rows.append(a, try a.dupe(t.Value, &.{
                 .{ .string = try a.dupe(u8, doc.name) },
                 if (doc.source) |source| .{ .string = try a.dupe(u8, source) } else .null,
-                .{ .string = "person_count(frame)" },
+                .{ .string = "yolo(frame, 'person')" },
                 .{ .int = @intCast(doc.entries.len) },
                 .{ .string = status },
             }));

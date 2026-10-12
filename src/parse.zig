@@ -204,7 +204,10 @@ const Parser = struct {
             try p.take(")");
             try p.take("(");
             const expr = try p.expression(0);
-            if (expr.kind != .call or !std.mem.eql(u8, expr.name, "person_count") or expr.args.len != 1 or expr.args[0].kind != .column or !std.mem.eql(u8, expr.args[0].name, "frame")) return error.UnsupportedIndexExpression;
+            if (expr.kind != .call) return error.UnsupportedIndexExpression;
+            const person = std.mem.eql(u8, expr.name, "person_count") and expr.args.len == 1;
+            const yolo_person = std.mem.eql(u8, expr.name, "yolo") and expr.args.len == 2 and expr.args[1].kind == .literal and expr.args[1].value == .string and std.ascii.eqlIgnoreCase(std.mem.trim(u8, expr.args[1].value.string, " \t\r\n"), "person");
+            if ((!person and !yolo_person) or expr.args[0].kind != .column or !std.mem.eql(u8, expr.args[0].name, "frame")) return error.UnsupportedIndexExpression;
             try p.take(")");
             const frame = try p.a.create(Expr);
             frame.* = .{ .kind = .column, .name = "frame" };
@@ -417,6 +420,10 @@ test "CREATE INDEX accepts frame filters and rejects unsupported expressions" {
     try std.testing.expectEqualStrings("it's.mp4", q.sourceFile().?);
     try std.testing.expect(q.uses(&.{"person_count"}));
     try std.testing.expectEqual(@as(usize, 1), q.predicates.len);
+    const generic = try parse(a, "CREATE INDEX people ON frames('video.mp4') (yolo(frame, 'PERSON')) WHERE frame_index <= 100");
+    try std.testing.expect(generic.uses(&.{"yolo"}));
+    try std.testing.expectError(error.UnsupportedIndexExpression, parse(a, "CREATE INDEX cars ON frames('video.mp4') (yolo(frame, 'car'))"));
+    try std.testing.expectError(error.UnsupportedIndexExpression, parse(a, "CREATE INDEX bad ON frames('video.mp4') (yolo(frame, 0))"));
     try std.testing.expectError(error.UnsupportedIndexExpression, parse(a, "CREATE INDEX bad ON frames('video.mp4') (motion(frame, frame))"));
     try std.testing.expectError(error.UnsupportedIndexPredicate, parse(a, "CREATE INDEX bad ON frames('video.mp4') (person_count(frame)) WHERE person_count(frame) > 0"));
     try std.testing.expectError(error.UnsupportedIndex, parse(a, "CREATE INDEX bad ON frames('video.mp4') (person_count(frame)) LIMIT 100"));
