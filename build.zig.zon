@@ -9,8 +9,8 @@
             .hash = "onnx-0.0.0-S9CpBUNECQBWzjciLVDlH_zHKeoLQYV-qJcQrq6mUK-6",
         },
         .sam3 = .{
-            .url = "git+https://github.com/kirillrdy/sam3#797290ceccc0866579791b3d02af079dc7db3fff",
-            .hash = "sam3-0.0.0-arUZ_gHsAABooVd-p-Xr82JU4JYWhbJ3Dt3G4EUN-pIv",
+            .url = "git+https://github.com/kirillrdy/sam3#75b2f6fd09efe6bdbe691bdcd62cbabb2e7f027b",
+            .hash = "sam3-0.0.0-arUZ_gHsAABPoE0QoTxdhxsT08uX_kFA0DKrkqJNQq32",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
